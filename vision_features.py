@@ -202,8 +202,10 @@ class VisionFeatureExtractor:
             scale=0.25,
         )
 
-        horizontal_map = np.abs(gx) * self.edge_gain
-        vertical_map = np.abs(gy) * self.edge_gain
+        # A vertical intensity gradient (gy) highlights horizontal structure;
+        # a horizontal intensity gradient (gx) highlights vertical structure.
+        horizontal_map = np.abs(gy) * self.edge_gain
+        vertical_map = np.abs(gx) * self.edge_gain
 
         return VisionFeatures(
             brightness=self._pool(brightness_map),
