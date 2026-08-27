@@ -1,17 +1,17 @@
 """
 UI.py
 
-Comparison cockpit for Visual_Play.
+Visual_Play experiment cockpit.
 
-Purpose
--------
-Provide one stable experiment surface for comparing:
+TOP:
+    Raw webcam plus the five fixed sensory maps produced by vision_features.py.
 
-TOP:    the current algorithmic Visual_Play cortical reconstruction
-BOTTOM: a future neuron-chain reconstruction driven by the same webcam frame
+BOTTOM:
+    Reserved for a future neuron-chain pathway that receives the same
+    VisionFeatures object. No neural output is fabricated before that pathway exists.
 
-The bottom path intentionally displays "not connected" until a genuine neural
-pipeline is supplied. It never fabricates neural output.
+The UI owns capture and presentation only. vision_features.py owns sensory extraction.
+Future neural code must own neural state, propagation, plasticity, and reconstruction.
 """
 
 from __future__ import annotations
@@ -23,21 +23,25 @@ from typing import Any, Dict, Optional, Protocol
 import cv2
 import numpy as np
 
-from cortical_system import CorticalSystem
+from vision_features import VisionFeatureExtractor, VisionFeatures
 
 
 @dataclass
 class NeuralFrameResult:
-    """Minimal contract expected from the future neuron-chain experiment."""
+    """Minimal result contract for the future neuron-chain experiment."""
 
     reconstruction: np.ndarray
     diagnostics: Dict[str, float]
 
 
 class NeuralSystem(Protocol):
-    """Future neural pathway contract. UI owns presentation, not cognition."""
+    """Future neural pathway contract; receives the exact sensory maps shown above."""
 
-    def process(self, frame: np.ndarray, learn: bool = True) -> NeuralFrameResult:
+    def process(
+        self,
+        features: VisionFeatures,
+        learn: bool = True,
+    ) -> NeuralFrameResult:
         ...
 
     def reset_activity(self) -> None:
@@ -45,29 +49,37 @@ class NeuralSystem(Protocol):
 
 
 class VisualComparisonUI:
-    """Side-by-side-in-time comparison cockpit: current path above, neural path below."""
+    """Display trustworthy sensory input above and future neural output below."""
 
-    WINDOW = "Visual Play - Current vs Neural Signal Flow"
+    WINDOW = "Visual Play - Sensory Input vs Neural Signal Flow"
     WIDTH = 1440
     HEADER_H = 58
-    PANEL_H = 330
-    FOOTER_H = 126
+    TOP_H = 440
+    BOTTOM_H = 300
+    FOOTER_H = 86
 
     def __init__(
         self,
-        current_system: Optional[CorticalSystem] = None,
+        extractor: Optional[VisionFeatureExtractor] = None,
         neural_system: Optional[NeuralSystem] = None,
     ) -> None:
-        self.current = current_system or CorticalSystem(cols=64, rows=36)
+        self.extractor = extractor or VisionFeatureExtractor(
+            cols=64,
+            rows=36,
+            mirror=True,
+            motion_decay=0.70,
+            contrast_gain=6.5,
+            motion_gain=7.5,
+            edge_gain=4.0,
+        )
         self.neural = neural_system
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_on = False
         self.learning_on = True
-        self.show_source = True
 
         self.last_frame: Optional[np.ndarray] = None
-        self.last_current: Optional[Dict[str, Any]] = None
+        self.last_features: Optional[VisionFeatures] = None
         self.last_neural: Optional[NeuralFrameResult] = None
 
         self.fps = 0.0
@@ -124,61 +136,226 @@ class VisualComparisonUI:
         return np.full((height, width, 3), value, dtype=np.uint8)
 
     @staticmethod
-    def _fit_image(image: np.ndarray, width: int, height: int) -> np.ndarray:
-        if image.ndim == 2:
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        image = np.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
-        if np.issubdtype(image.dtype, np.floating):
-            lo = float(np.min(image))
-            hi = float(np.max(image))
-            if hi - lo > 1e-8:
-                image = (image - lo) / (hi - lo)
-            else:
-                image = np.zeros_like(image)
-            image = (np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
-        else:
-            image = np.clip(image, 0, 255).astype(np.uint8)
-        return cv2.resize(image, (width, height), interpolation=cv2.INTER_NEAREST)
+    def _to_bgr_unit_map(feature_map: np.ndarray) -> np.ndarray:
+        """Render a true 0..1 feature map without per-frame contrast rescaling."""
+        unit = np.nan_to_num(
+            np.asarray(feature_map, dtype=np.float32),
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        )
+        unit = np.clip(unit, 0.0, 1.0)
+        gray = (unit * 255.0).astype(np.uint8)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     @staticmethod
-    def _label(canvas: np.ndarray, text: str, y: int, scale: float = 0.52) -> None:
+    def _fit_image(
+        image: np.ndarray,
+        width: int,
+        height: int,
+        interpolation: int = cv2.INTER_NEAREST,
+    ) -> np.ndarray:
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        return cv2.resize(image, (width, height), interpolation=interpolation)
+
+    @staticmethod
+    def _label(
+        canvas: np.ndarray,
+        text: str,
+        y: int,
+        scale: float = 0.50,
+    ) -> None:
         cv2.putText(
             canvas,
             text,
             (16, y),
             cv2.FONT_HERSHEY_SIMPLEX,
             scale,
-            (230, 230, 230),
+            (225, 225, 230),
             1,
             cv2.LINE_AA,
         )
 
-    def _current_reconstruction(self) -> np.ndarray:
-        if self.last_current is None:
-            return self._blank(self.PANEL_H - 42, self.WIDTH, 5)
+    def _tile(
+        self,
+        image: np.ndarray,
+        title: str,
+        subtitle: str,
+        width: int,
+        height: int,
+        *,
+        smooth: bool = False,
+    ) -> np.ndarray:
+        tile = self._blank(height, width, 9)
+        body_h = height - 45
+        fitted = self._fit_image(
+            image,
+            width,
+            body_h,
+            cv2.INTER_AREA if smooth else cv2.INTER_NEAREST,
+        )
+        tile[45:, :] = fitted
+        cv2.rectangle(tile, (0, 0), (width - 1, 44), (20, 20, 24), -1)
+        cv2.putText(
+            tile,
+            title,
+            (10, 19),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            tile,
+            subtitle,
+            (10, 37),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (160, 165, 175),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(tile, (0, 0), (width - 1, height - 1), (62, 62, 70), 1)
+        return tile
 
-        v1 = self.last_current["v1"]
-        recon = np.asarray(v1.reconstruction, dtype=np.float32)
+    def _camera_image(self) -> np.ndarray:
+        if self.last_frame is None or not self.camera_on:
+            image = self._blank(180, 320, 4)
+            cv2.putText(
+                image,
+                "CAMERA OFF",
+                (92, 96),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (100, 100, 220),
+                2,
+                cv2.LINE_AA,
+            )
+            return image
 
-        # Diagnostic color projection only. It does not feed learning.
-        luminance = recon[0]
-        motion = recon[2]
-        edges = recon[3] + recon[4]
+        # VisionFeatureExtractor mirrors internally; mirror source display to match it.
+        return cv2.flip(self.last_frame, 1)
 
-        blue = np.clip(luminance * 2.0, 0.0, 1.0)
-        green = np.clip(edges * 3.0, 0.0, 1.0)
-        red = np.clip(motion * 4.0, 0.0, 1.0)
-        rgb = np.stack([blue, green, red], axis=2)
-        return self._fit_image(rgb, self.WIDTH, self.PANEL_H - 42)
+    def _render_sensory_panel(self) -> np.ndarray:
+        panel = self._blank(self.TOP_H, self.WIDTH, 7)
 
-    def _neural_reconstruction(self) -> np.ndarray:
-        body_h = self.PANEL_H - 42
+        title_h = 42
+        cv2.rectangle(panel, (0, 0), (self.WIDTH - 1, title_h - 1), (16, 16, 20), -1)
+        cv2.putText(
+            panel,
+            "TOP - TRUSTWORTHY SENSORY INPUT",
+            (16, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.64,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "webcam + fixed vision_features.py maps; no cortical reconstruction",
+            (390, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (165, 170, 180),
+            1,
+            cv2.LINE_AA,
+        )
+
+        gap = 8
+        cols = 3
+        rows = 2
+        tile_w = (self.WIDTH - gap * (cols + 1)) // cols
+        tile_h = (self.TOP_H - title_h - gap * (rows + 1)) // rows
+
+        feature_items = []
+        if self.last_features is not None:
+            f = self.last_features
+            feature_items = [
+                ("BRIGHTNESS", f.brightness),
+                ("CONTRAST", f.contrast),
+                ("MOTION", f.motion),
+                ("HORIZONTAL EDGES", f.horizontal),
+                ("VERTICAL EDGES", f.vertical),
+            ]
+
+        tiles = [
+            self._tile(
+                self._camera_image(),
+                "WEBCAM",
+                "shared physical input",
+                tile_w,
+                tile_h,
+                smooth=True,
+            )
+        ]
+
+        for title, fmap in feature_items:
+            mean = float(np.mean(fmap))
+            peak = float(np.max(fmap))
+            tiles.append(
+                self._tile(
+                    self._to_bgr_unit_map(fmap),
+                    title,
+                    f"mean {mean:.3f} | peak {peak:.3f}",
+                    tile_w,
+                    tile_h,
+                )
+            )
+
+        while len(tiles) < 6:
+            tiles.append(
+                self._tile(
+                    self._blank(100, 100, 4),
+                    "WAITING",
+                    "no sensory frame yet",
+                    tile_w,
+                    tile_h,
+                )
+            )
+
+        for index, tile in enumerate(tiles[:6]):
+            r = index // cols
+            c = index % cols
+            x = gap + c * (tile_w + gap)
+            y = title_h + gap + r * (tile_h + gap)
+            panel[y:y + tile_h, x:x + tile_w] = tile
+
+        return panel
+
+    def _render_neural_panel(self) -> np.ndarray:
+        panel = self._blank(self.BOTTOM_H, self.WIDTH, 6)
+        cv2.rectangle(panel, (0, 0), (self.WIDTH - 1, 41), (16, 16, 20), -1)
+        cv2.putText(
+            panel,
+            "BOTTOM - NEURON CHAIN SIGNAL FLOW",
+            (16, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.64,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            panel,
+            "future locally interacting neural fields receive the exact maps shown above",
+            (440, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (165, 170, 180),
+            1,
+            cv2.LINE_AA,
+        )
+
+        body_h = self.BOTTOM_H - 42
+
         if self.neural is None:
-            panel = self._blank(body_h, self.WIDTH, 5)
             cv2.putText(
                 panel,
                 "NEURAL CHAIN NOT CONNECTED YET",
-                (self.WIDTH // 2 - 245, body_h // 2 - 8),
+                (self.WIDTH // 2 - 245, 42 + body_h // 2 - 12),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.82,
                 (120, 170, 255),
@@ -187,70 +364,34 @@ class VisualComparisonUI:
             )
             cv2.putText(
                 panel,
-                "This panel will only show output produced by the neuron-to-neuron pathway.",
-                (self.WIDTH // 2 - 320, body_h // 2 + 28),
+                "No placeholder cognition or fake reconstruction is being generated.",
+                (self.WIDTH // 2 - 300, 42 + body_h // 2 + 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
+                0.47,
                 (165, 165, 175),
                 1,
                 cv2.LINE_AA,
             )
             return panel
 
-        if self.last_neural is None:
-            return self._blank(body_h, self.WIDTH, 5)
+        if self.last_neural is not None:
+            recon = np.asarray(self.last_neural.reconstruction)
+            if recon.ndim == 2:
+                recon = self._to_bgr_unit_map(recon)
+            elif np.issubdtype(recon.dtype, np.floating):
+                recon = np.clip(np.nan_to_num(recon), 0.0, 1.0)
+                recon = (recon * 255.0).astype(np.uint8)
+            else:
+                recon = np.clip(recon, 0, 255).astype(np.uint8)
 
-        return self._fit_image(
-            np.asarray(self.last_neural.reconstruction),
-            self.WIDTH,
-            body_h,
-        )
+            panel[42:, :] = self._fit_image(
+                recon,
+                self.WIDTH,
+                body_h,
+                cv2.INTER_NEAREST,
+            )
 
-    def _render_panel(self, title: str, subtitle: str, image: np.ndarray) -> np.ndarray:
-        panel = self._blank(self.PANEL_H, self.WIDTH, 9)
-        cv2.rectangle(panel, (0, 0), (self.WIDTH - 1, 41), (20, 20, 24), -1)
-        cv2.putText(
-            panel,
-            title,
-            (16, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
-            (245, 245, 245),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            panel,
-            subtitle,
-            (430, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            (165, 165, 175),
-            1,
-            cv2.LINE_AA,
-        )
-        panel[42:, :] = self._fit_image(image, self.WIDTH, self.PANEL_H - 42)
-        cv2.rectangle(panel, (0, 0), (self.WIDTH - 1, self.PANEL_H - 1), (70, 70, 78), 1)
         return panel
-
-    def _source_inset(self, canvas: np.ndarray) -> None:
-        if not self.show_source:
-            return
-        inset_w, inset_h = 256, 144
-        x0 = self.WIDTH - inset_w - 16
-        y0 = self.HEADER_H + 52
-
-        if self.last_frame is not None and self.camera_on:
-            src = cv2.flip(self.last_frame, 1)
-            src = cv2.resize(src, (inset_w, inset_h), interpolation=cv2.INTER_AREA)
-        else:
-            src = self._blank(inset_h, inset_w, 4)
-            cv2.putText(src, "CAMERA OFF", (72, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 220), 2)
-
-        canvas[y0:y0 + inset_h, x0:x0 + inset_w] = src
-        cv2.rectangle(canvas, (x0, y0), (x0 + inset_w, y0 + inset_h), (220, 220, 220), 1)
-        cv2.rectangle(canvas, (x0, y0), (x0 + inset_w, y0 + 24), (18, 18, 22), -1)
-        cv2.putText(canvas, "SHARED WEBCAM INPUT", (x0 + 8, y0 + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
     def _button(
         self,
@@ -267,82 +408,136 @@ class VisualComparisonUI:
         border = (110, 215, 120) if active else (105, 105, 120)
         cv2.rectangle(header, (x1, y1), (x2, y2), fill, -1)
         cv2.rectangle(header, (x1, y1), (x2, y2), border, 1)
-        cv2.putText(header, text, (x1 + 9, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (245, 245, 245), 1, cv2.LINE_AA)
+        cv2.putText(
+            header,
+            text,
+            (x1 + 9, 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
 
     def _render_header(self) -> np.ndarray:
         header = self._blank(self.HEADER_H, self.WIDTH, 13)
-        self._button(header, "camera", 14, 198, "CAMERA ON/OFF [k]", self.camera_on)
-        self._button(header, "learning", 210, 390, "LEARNING [l]", self.learning_on)
-        self._button(header, "reset", 402, 555, "RESET STATE [r]")
-        self._button(header, "source", 567, 735, "SOURCE INSET [s]", self.show_source)
+        self._button(
+            header,
+            "camera",
+            14,
+            198,
+            "CAMERA ON/OFF [k]",
+            self.camera_on,
+        )
+        self._button(
+            header,
+            "reset",
+            210,
+            380,
+            "RESET SENSORY [r]",
+        )
+        self._button(
+            header,
+            "learning",
+            392,
+            590,
+            "NEURAL LEARNING [l]",
+            self.learning_on,
+        )
 
         neural_status = "CONNECTED" if self.neural is not None else "NOT BUILT"
         status = f"FPS {self.fps:5.1f}   |   NEURAL PATH: {neural_status}"
-        cv2.putText(header, status, (850, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 120), 1, cv2.LINE_AA)
+        cv2.putText(
+            header,
+            status,
+            (850, 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (220, 220, 120),
+            1,
+            cv2.LINE_AA,
+        )
         return header
 
     def _render_footer(self) -> np.ndarray:
         footer = self._blank(self.FOOTER_H, self.WIDTH, 12)
         cv2.line(footer, (0, 0), (self.WIDTH, 0), (70, 70, 78), 1)
 
-        if self.last_current is not None:
-            v1 = self.last_current["v1"]
-            assoc = self.last_current["assoc"]
-            temp = self.last_current["temporal"]
-            pari = self.last_current["parietal"]
-            self._label(footer, f"CURRENT  V1 active: {v1.active_count} | novelty: {v1.novelty:.3f} | feedback steps: {v1.feedback_steps} | weight change: {v1.mean_weight_change:.6f}", 28)
-            self._label(footer, f"STREAMS  ventral gate: {assoc.mean_ventral_gate:.3f} | dorsal gate: {assoc.mean_dorsal_gate:.3f} | temporal stability: {temp.stability:.3f}", 54)
-            self._label(footer, f"MOTION   energy: {pari.motion_energy:.4f} | centroid: ({pari.centroid[0]:.2f}, {pari.centroid[1]:.2f}) | vector: ({pari.motion_vector[0]:+.2f}, {pari.motion_vector[1]:+.2f})", 80)
+        if self.last_features is not None:
+            f = self.last_features
+            self._label(
+                footer,
+                "SENSORY  "
+                f"brightness {np.mean(f.brightness):.3f} | "
+                f"contrast {np.mean(f.contrast):.3f} | "
+                f"motion {np.mean(f.motion):.3f} | "
+                f"H-edge {np.mean(f.horizontal):.3f} | "
+                f"V-edge {np.mean(f.vertical):.3f}",
+                28,
+            )
 
         if self.neural is None:
-            self._label(footer, "NEURAL   awaiting genuine neuron-chain owner; no placeholder cognition is being generated", 108, 0.48)
+            self._label(
+                footer,
+                "NEURAL   awaiting genuine neuron-chain owner; top panel is only the measured sensory baseline",
+                58,
+                0.48,
+            )
         elif self.last_neural is not None:
-            parts = [f"{key}: {value:.4f}" for key, value in sorted(self.last_neural.diagnostics.items())]
-            self._label(footer, "NEURAL   " + " | ".join(parts)[:180], 108, 0.48)
+            parts = [
+                f"{key}: {value:.4f}"
+                for key, value in sorted(self.last_neural.diagnostics.items())
+            ]
+            self._label(
+                footer,
+                "NEURAL   " + " | ".join(parts)[:180],
+                58,
+                0.48,
+            )
 
         return footer
 
     def _compose(self) -> np.ndarray:
-        top = self._render_panel(
-            "TOP - CURRENT CODED SIGNAL FLOW",
-            "Existing Visual_Play V1 diagnostic projection",
-            self._current_reconstruction(),
+        return np.vstack(
+            [
+                self._render_header(),
+                self._render_sensory_panel(),
+                self._render_neural_panel(),
+                self._render_footer(),
+            ]
         )
-        bottom = self._render_panel(
-            "BOTTOM - NEURON CHAIN SIGNAL FLOW",
-            "Reserved for locally interacting retinotopic neurons",
-            self._neural_reconstruction(),
-        )
-        canvas = np.vstack([self._render_header(), top, bottom, self._render_footer()])
-        self._source_inset(canvas)
-        return canvas
 
     # ------------------------------------------------------------------
     # Interaction / runtime
     # ------------------------------------------------------------------
 
     def reset_state(self) -> None:
-        self.current.reset_activity()
-        self.current.reset_expectation()
+        self.extractor.reset()
         if self.neural is not None:
             self.neural.reset_activity()
-        self.last_current = None
+        self.last_features = None
         self.last_neural = None
 
-    def _mouse(self, event: int, x: int, y: int, flags: int, param: Any) -> None:
+    def _mouse(
+        self,
+        event: int,
+        x: int,
+        y: int,
+        flags: int,
+        param: Any,
+    ) -> None:
         del flags, param
         if event != cv2.EVENT_LBUTTONDOWN:
             return
+
         for name, (x1, y1, x2, y2) in self.buttons.items():
             if x1 <= x <= x2 and y1 <= y <= y2:
                 if name == "camera":
                     self.toggle_camera()
-                elif name == "learning":
-                    self.learning_on = not self.learning_on
                 elif name == "reset":
                     self.reset_state()
-                elif name == "source":
-                    self.show_source = not self.show_source
+                elif name == "learning":
+                    self.learning_on = not self.learning_on
                 break
 
     def _handle_key(self, key: int) -> bool:
@@ -351,27 +546,25 @@ class VisualComparisonUI:
             return False
         if key in (ord("k"), ord("p"), 32):
             self.toggle_camera()
-        elif key == ord("l"):
-            self.learning_on = not self.learning_on
         elif key == ord("r"):
             self.reset_state()
-        elif key == ord("s"):
-            self.show_source = not self.show_source
+        elif key == ord("l"):
+            self.learning_on = not self.learning_on
         return True
 
     def run(self) -> None:
+        total_h = self.HEADER_H + self.TOP_H + self.BOTTOM_H + self.FOOTER_H
         cv2.namedWindow(self.WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.WINDOW, self.WIDTH, self.HEADER_H + 2 * self.PANEL_H + self.FOOTER_H)
+        cv2.resizeWindow(self.WINDOW, self.WIDTH, total_h)
         cv2.setMouseCallback(self.WINDOW, self._mouse)
 
         if not self.connect_camera():
             print(">> Camera unavailable at startup. UI will remain open with camera OFF.")
 
-        print("Visual_Play comparison UI")
+        print("Visual_Play sensory-vs-neural UI")
         print("  k / space : connect-disconnect camera")
-        print("  l         : freeze-enable learning")
-        print("  r         : reset current and neural state")
-        print("  s         : toggle shared webcam inset")
+        print("  r         : reset sensory temporal state")
+        print("  l         : freeze-enable future neural learning")
         print("  q / esc   : quit")
 
         try:
@@ -386,10 +579,16 @@ class VisualComparisonUI:
                     ok, frame = self.cap.read()
                     if ok:
                         self.last_frame = frame.copy()
-                        # Both paths receive the exact same captured frame.
-                        self.last_current = self.current.process(frame, learn=self.learning_on)
+
+                        # Extract once. The top displays these exact maps and the
+                        # future neural path receives the same VisionFeatures object.
+                        self.last_features = self.extractor.extract(frame)
+
                         if self.neural is not None:
-                            self.last_neural = self.neural.process(frame, learn=self.learning_on)
+                            self.last_neural = self.neural.process(
+                                self.last_features,
+                                learn=self.learning_on,
+                            )
                     else:
                         time.sleep(0.01)
 
