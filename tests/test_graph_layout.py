@@ -1,7 +1,15 @@
 import unittest
 
 from experiment_spec import ExperimentSpec
-from graph_layout import apply_grid, field_depths, grid_positions, relaxed_positions
+from graph_layout import (
+    apply_grid,
+    field_depths,
+    field_world_positions,
+    grid_positions,
+    plane_node_positions,
+    project_points_3d,
+    relaxed_positions,
+)
 
 
 class GraphLayoutTests(unittest.TestCase):
@@ -52,6 +60,42 @@ class GraphLayoutTests(unittest.TestCase):
         spec.add_connection(third.id, second.id)
         depths = field_depths(spec)
         self.assertLessEqual(max(depths.values()), len(spec.layers))
+
+    def test_normal_chain_advances_on_z_not_x(self):
+        spec = ExperimentSpec.default()
+        first = spec.layers[0]
+        second = spec.add_layer(name="Second")
+        spec.add_connection(first.id, second.id)
+
+        world = field_world_positions(spec)
+        self.assertEqual(world[first.id][0], 0.0)
+        self.assertEqual(world[second.id][0], 0.0)
+        self.assertGreater(world[second.id][2], world[first.id][2])
+
+    def test_explicit_branches_share_depth_and_split_laterally(self):
+        spec = ExperimentSpec.default()
+        first = spec.layers[0]
+        left = spec.add_layer(name="Left")
+        right = spec.add_layer(name="Right")
+        spec.add_connection(first.id, left.id)
+        spec.add_connection(first.id, right.id)
+
+        world = field_world_positions(spec)
+        self.assertEqual(world[left.id][2], world[right.id][2])
+        self.assertNotEqual(world[left.id][0], world[right.id][0])
+
+    def test_100_by_100_plane_projects_10000_distinct_node_positions(self):
+        world = plane_node_positions(100, 100, (0.0, 0.0, 0.0))
+        screen, _ = project_points_3d(
+            world,
+            screen_center=(680, 292),
+            yaw_degrees=32.0,
+            pitch_degrees=-16.0,
+        )
+
+        self.assertEqual(world.shape, (10000, 3))
+        self.assertEqual(screen.shape, (10000, 2))
+        self.assertEqual(len({tuple(point) for point in screen}), 10000)
 
 
 if __name__ == "__main__":

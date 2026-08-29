@@ -1,28 +1,57 @@
 import unittest
 
 from UI import VisualExperimentUI
+from graph_layout import field_world_positions
 
 
-class NodeCentricUITests(unittest.TestCase):
-    def test_100_by_100_field_exposes_10000_distinct_node_positions(self):
+class NodeCentric3DUITests(unittest.TestCase):
+    def test_100_by_100_field_exposes_10000_projected_nodes(self):
         ui = VisualExperimentUI()
         ui._compose()
-        layer = ui.spec.layers[0]
-        points = ui._nodes(layer, ui.field_rects[layer.id])
-        self.assertEqual(len(points), 10000)
-        self.assertEqual(len({tuple(map(int, point)) for point in points}), 10000)
 
-    def test_branch_creates_downstream_field_without_movable_layer_card(self):
+        first = ui.spec.layers[0]
+        points = ui.field_screen_nodes[first.id]
+
+        self.assertEqual(len(points), 10000)
+        self.assertEqual(len({tuple(point) for point in points}), 10000)
+
+    def test_add_next_field_builds_depth_chain(self):
         ui = VisualExperimentUI()
         first = ui.spec.layers[0]
         ui.selected_kind = "layer"
         ui.selected_id = first.id
-        ui._add_branch()
-        ui._compose()
+
+        ui._control("add")
         second = ui.spec.layers[-1]
-        self.assertIn(first.id, ui.field_rects)
-        self.assertIn(second.id, ui.field_rects)
-        self.assertLess(ui.field_rects[first.id][1], ui.field_rects[second.id][1])
+        world = field_world_positions(ui.spec)
+
+        self.assertEqual(world[first.id][0], 0.0)
+        self.assertEqual(world[second.id][0], 0.0)
+        self.assertGreater(world[second.id][2], world[first.id][2])
+        self.assertTrue(
+            any(
+                path.source_id == first.id and path.target_id == second.id
+                for path in ui.spec.connections
+            )
+        )
+
+    def test_explicit_branch_splits_laterally_at_same_depth(self):
+        ui = VisualExperimentUI()
+        first = ui.spec.layers[0]
+
+        ui.selected_kind = "layer"
+        ui.selected_id = first.id
+        ui._control("branch")
+        branch_one = ui.spec.layers[-1]
+
+        ui.selected_kind = "layer"
+        ui.selected_id = first.id
+        ui._control("branch")
+        branch_two = ui.spec.layers[-1]
+
+        world = field_world_positions(ui.spec)
+        self.assertEqual(world[branch_one.id][2], world[branch_two.id][2])
+        self.assertNotEqual(world[branch_one.id][0], world[branch_two.id][0])
 
 
 if __name__ == "__main__":
