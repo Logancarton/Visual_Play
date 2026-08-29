@@ -14,6 +14,7 @@ class ExperimentSpecTests(unittest.TestCase):
         self.assertEqual(len(spec.connections), 1)
         self.assertEqual(spec.connections[0].source_id, "sensor:brightness")
         self.assertEqual(spec.connections[0].target_id, spec.layers[0].id)
+        self.assertEqual(spec.connections[0].pattern, "one_to_one")
 
     def test_layers_branch_without_duplicate_connection_authority(self):
         spec = ExperimentSpec.default()
@@ -53,11 +54,16 @@ class ExperimentSpecTests(unittest.TestCase):
         self.assertIsNotNone(spec.connection_by_id(keep.id))
         self.assertIsNone(spec.layer_by_id(second.id))
 
-    def test_round_trip_save_load(self):
+    def test_round_trip_save_load_preserves_notes_layout_and_pins(self):
         spec = ExperimentSpec.default()
         layer = spec.layers[0]
         spec.toggle_mechanism(layer.id, "stdp")
         spec.set_visualization("potential")
+        spec.notes = "Attempting luminance-preserving local organization."
+        layer.notes = "First field note"
+        layer.pinned = True
+        spec.connections[0].notes = "Connection note"
+        spec.set_layout_mode("manual")
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "experiment.json"
@@ -65,6 +71,12 @@ class ExperimentSpecTests(unittest.TestCase):
             loaded = ExperimentSpec.load(path)
 
         self.assertEqual(loaded.to_dict(), spec.to_dict())
+
+    def test_invalid_version_fails_safely(self):
+        payload = ExperimentSpec.default().to_dict()
+        payload["version"] = 999
+        with self.assertRaises(ValueError):
+            ExperimentSpec.from_dict(payload)
 
 
 if __name__ == "__main__":

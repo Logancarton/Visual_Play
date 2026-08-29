@@ -4,7 +4,7 @@ experiment_spec.py
 Declarative experiment description for Visual_Play.
 
 This file owns what the user wants to build: sensory sources, neural fields,
-connections, mechanisms, and tunable structural parameters. It intentionally
+connections, mechanisms, notes, and graph layout state. It intentionally
 contains no neural simulation math.
 """
 
@@ -14,6 +14,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+
+SPEC_VERSION = 1
 
 SENSORY_SOURCES = (
     "sensor:brightness",
@@ -59,6 +61,7 @@ VISUALIZATION_MODES = (
     "weights",
     "spikes",
 )
+LAYOUT_MODES = ("manual", "dynamic")
 
 
 def _default_mechanisms() -> Dict[str, bool]:
@@ -96,6 +99,8 @@ class LayerSpec:
     y: float = 0.50
     mechanisms: Dict[str, bool] = field(default_factory=_default_mechanisms)
     parameters: Dict[str, float] = field(default_factory=_default_parameters)
+    notes: str = ""
+    pinned: bool = False
 
     @property
     def unit_count(self) -> int:
@@ -106,6 +111,8 @@ class LayerSpec:
         self.cols = int(max(1, min(512, self.cols)))
         self.x = float(max(0.0, min(1.0, self.x)))
         self.y = float(max(0.0, min(1.0, self.y)))
+        self.notes = str(self.notes)
+        self.pinned = bool(self.pinned)
 
         clean = _default_mechanisms()
         for key, value in self.mechanisms.items():
@@ -136,6 +143,7 @@ class ConnectionSpec:
     plasticity: str = "none"
     modulator: str = "none"
     gain: float = 1.0
+    notes: str = ""
 
     def clamp(self) -> None:
         if self.pattern not in CONNECTION_PATTERNS:
@@ -150,22 +158,36 @@ class ConnectionSpec:
         self.density = float(max(0.01, min(1.0, self.density)))
         self.delay = int(max(0, min(100, self.delay)))
         self.gain = float(max(0.0, min(10.0, self.gain)))
+        self.notes = str(self.notes)
 
 
 @dataclass
 class ExperimentSpec:
     name: str = "Visual Play Experiment"
+    notes: str = (
+        "Build a spatial visual pathway and later compare real network-derived visual output "
+        "against the measured source without arbitrary reshaping."
+    )
+    version: int = SPEC_VERSION
     layers: List[LayerSpec] = field(default_factory=list)
     connections: List[ConnectionSpec] = field(default_factory=list)
     visualization_mode: str = "activity"
+    layout_mode: str = "dynamic"
     next_layer_index: int = 1
     next_connection_index: int = 1
 
     @classmethod
     def default(cls) -> "ExperimentSpec":
         spec = cls()
-        layer = spec.add_layer(name="Layer 1", rows=100, cols=100, x=0.52, y=0.48)
-        spec.add_connection("sensor:brightness", layer.id)
+        layer = spec.add_layer(name="Layer 1", rows=100, cols=100, x=0.50, y=0.20)
+        layer.notes = (
+            "First downstream neural field receiving brightness. Mechanisms remain "
+            "configuration-only until a separate neural engine implements them."
+        )
+        connection = spec.add_connection("sensor:brightness", layer.id)
+        connection.pattern = "one_to_one"
+        connection.density = 1.0
+        connection.notes = "Preserve direct spatial correspondence from luminance into Layer 1."
         return spec
 
     def layer_by_id(self, layer_id: str) -> Optional[LayerSpec]:
@@ -185,14 +207,23 @@ class ExperimentSpec:
         cols: int = 100,
         x: Optional[float] = None,
         y: Optional[float] = None,
+        notes: str = "",
     ) -> LayerSpec:
         layer_id = f"layer:{self.next_layer_index}"
         display_name = name or f"Layer {self.next_layer_index}"
         if x is None:
-            x = 0.36 + 0.16 * ((self.next_layer_index - 1) % 4)
+            x = 0.30 + 0.18 * ((self.next_layer_index - 1) % 3)
         if y is None:
-            y = 0.30 + 0.18 * (((self.next_layer_index - 1) // 4) % 3)
-        layer = LayerSpec(layer_id, display_name, rows, cols, x, y)
+            y = 0.20 + 0.22 * (((self.next_layer_index - 1) // 3) % 3)
+        layer = LayerSpec(
+            id=layer_id,
+            name=display_name,
+            rows=rows,
+            cols=cols,
+            x=x,
+            y=y,
+            notes=notes,
+        )
         layer.clamp()
         self.layers.append(layer)
         self.next_layer_index += 1
@@ -262,7 +293,21 @@ class ExperimentSpec:
             raise ValueError(f"Unknown visualization mode: {mode}")
         self.visualization_mode = mode
 
+    def set_layout_mode(self, mode: str) -> None:
+        if mode not in LAYOUT_MODES:
+            raise ValueError(f"Unknown layout mode: {mode}")
+        self.layout_mode = mode
+
     def validate(self) -> None:
+        if self.version != SPEC_VERSION:
+            raise ValueError(
+                f"Unsupported experiment version {self.version}; expected {SPEC_VERSION}."
+            )
+        self.name = str(self.name).strip() or "Visual Play Experiment"
+        self.notes = str(self.notes)
+        if self.layout_mode not in LAYOUT_MODES:
+            self.layout_mode = "dynamic"
+
         layer_ids = [layer.id for layer in self.layers]
         if len(layer_ids) != len(set(layer_ids)):
             raise ValueError("Layer IDs must be unique.")
@@ -318,9 +363,12 @@ class ExperimentSpec:
         ]
         spec = cls(
             name=str(payload.get("name", "Visual Play Experiment")),
+            notes=str(payload.get("notes", "")),
+            version=int(payload.get("version", SPEC_VERSION)),
             layers=layers,
             connections=connections,
             visualization_mode=str(payload.get("visualization_mode", "activity")),
+            layout_mode=str(payload.get("layout_mode", "dynamic")),
             next_layer_index=int(payload.get("next_layer_index", 1)),
             next_connection_index=int(payload.get("next_connection_index", 1)),
         )
