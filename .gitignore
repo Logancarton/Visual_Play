@@ -1,6 +1,5 @@
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
 venv/
 .DS_Store
-experiment.local.json
