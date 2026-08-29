@@ -8,7 +8,7 @@ class NodeCentricUITests(unittest.TestCase):
         ui = VisualExperimentUI()
         ui._compose()
         layer = ui.spec.layers[0]
-        points = ui._field_node_positions(layer, ui.field_rects[layer.id])
+        points = ui._nodes(layer, ui.field_rects[layer.id])
         self.assertEqual(len(points), 10000)
         self.assertEqual(len({tuple(map(int, point)) for point in points}), 10000)
 
