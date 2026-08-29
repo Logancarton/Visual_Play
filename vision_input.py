@@ -24,8 +24,8 @@ class VisualInputExtractor:
     def __init__(
         self,
         *,
-        cols: int = 64,
-        rows: int = 36,
+        cols: int = 256,
+        rows: int = 144,
         mirror: bool = True,
         scale_intermediate: Optional[Tuple[int, int]] = (640, 360),
     ) -> None:
