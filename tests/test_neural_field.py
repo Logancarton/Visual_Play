@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from neural_field import RetinalVariationPathway, SpatialNeuronField, SynapseProjection
+from neural_field import RetinalSignalPathway, SpatialNeuronField, SynapseProjection
 from vision_input import VisualInputExtractor
 
 
@@ -36,18 +36,18 @@ class SynapseProjectionTests(unittest.TestCase):
         np.testing.assert_allclose(drive, np.array([0.4, 0.5], dtype=np.float32))
 
 
-class RetinalVariationPathwayTests(unittest.TestCase):
-    def test_first_frame_seeds_local_baseline_without_fabricating_change(self):
-        pathway = RetinalVariationPathway(2, 3)
+class RetinalSignalPathwayTests(unittest.TestCase):
+    def test_first_frame_seeds_temporal_baseline_without_fabricating_variation(self):
+        pathway = RetinalSignalPathway(2, 3)
         first = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
         result = pathway.process(first, timestamp_ms=100.0)
         np.testing.assert_allclose(result.baseline, first)
         self.assertTrue(np.all(result.on_activity == 0.0))
         self.assertTrue(np.all(result.off_activity == 0.0))
-        self.assertEqual(pathway.neuron_count, 12)
+        self.assertEqual(pathway.neuron_count, 18)
 
     def test_each_location_splits_brighter_and_darker_change_independently(self):
-        pathway = RetinalVariationPathway(1, 3, response_gain=2.0)
+        pathway = RetinalSignalPathway(1, 3, response_gain=2.0)
         pathway.process(np.array([[0.5, 0.5, 0.5]], dtype=np.float32), timestamp_ms=0.0)
         result = pathway.process(
             np.array([[0.7, 0.3, 0.5]], dtype=np.float32),
@@ -57,7 +57,7 @@ class RetinalVariationPathwayTests(unittest.TestCase):
         np.testing.assert_allclose(result.off_activity, [[0.0, 0.4, 0.0]], atol=1e-6)
 
     def test_unchanged_input_fades_as_each_local_baseline_adapts(self):
-        pathway = RetinalVariationPathway(
+        pathway = RetinalSignalPathway(
             1,
             1,
             baseline_tau_ms=100.0,
@@ -69,8 +69,50 @@ class RetinalVariationPathwayTests(unittest.TestCase):
         self.assertGreater(float(early.on_activity[0, 0]), float(later.on_activity[0, 0]))
         self.assertEqual(float(later.off_activity[0, 0]), 0.0)
 
+    def test_uniform_spatial_input_has_zero_local_contrast(self):
+        pathway = RetinalSignalPathway(3, 3)
+        result = pathway.process(
+            np.full((3, 3), 0.5, dtype=np.float32),
+            timestamp_ms=0.0,
+        )
+        np.testing.assert_allclose(result.contrast_activity, 0.0, atol=1e-7)
+
+    def test_bright_center_produces_local_contrast_at_same_center(self):
+        pathway = RetinalSignalPathway(3, 3, contrast_gain=2.0)
+        image = np.full((3, 3), 0.5, dtype=np.float32)
+        image[1, 1] = 1.0
+        result = pathway.process(image, timestamp_ms=0.0)
+        self.assertGreater(float(result.contrast_activity[1, 1]), 0.0)
+        self.assertGreater(
+            float(result.contrast_activity[1, 1]),
+            float(result.contrast_activity[0, 0]),
+        )
+
+    def test_dark_center_produces_local_contrast_at_same_center(self):
+        pathway = RetinalSignalPathway(3, 3, contrast_gain=2.0)
+        image = np.full((3, 3), 0.5, dtype=np.float32)
+        image[1, 1] = 0.0
+        result = pathway.process(image, timestamp_ms=0.0)
+        self.assertGreater(float(result.contrast_activity[1, 1]), 0.0)
+        self.assertGreater(
+            float(result.contrast_activity[1, 1]),
+            float(result.contrast_activity[0, 0]),
+        )
+
+    def test_bad_input_fails_without_mutating_retinal_state(self):
+        pathway = RetinalSignalPathway(2, 2)
+        pathway.process(np.full((2, 2), 0.5, dtype=np.float32), timestamp_ms=100.0)
+        before = pathway.snapshot()
+        with self.assertRaises(ValueError):
+            pathway.process(np.zeros((3, 3), dtype=np.float32), timestamp_ms=110.0)
+        after = pathway.snapshot()
+        np.testing.assert_array_equal(after.baseline, before.baseline)
+        np.testing.assert_array_equal(after.on_activity, before.on_activity)
+        np.testing.assert_array_equal(after.off_activity, before.off_activity)
+        np.testing.assert_array_equal(after.contrast_activity, before.contrast_activity)
+
     def test_backward_time_fails_without_mutating_retinal_state(self):
-        pathway = RetinalVariationPathway(1, 1)
+        pathway = RetinalSignalPathway(1, 1)
         pathway.process(np.array([[0.5]], dtype=np.float32), timestamp_ms=100.0)
         before = pathway.snapshot()
         with self.assertRaises(ValueError):
@@ -79,6 +121,7 @@ class RetinalVariationPathwayTests(unittest.TestCase):
         np.testing.assert_array_equal(after.baseline, before.baseline)
         np.testing.assert_array_equal(after.on_activity, before.on_activity)
         np.testing.assert_array_equal(after.off_activity, before.off_activity)
+        np.testing.assert_array_equal(after.contrast_activity, before.contrast_activity)
 
 
 class VisualInputTests(unittest.TestCase):

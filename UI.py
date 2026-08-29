@@ -1,7 +1,8 @@
-"""Minimal live diagnostic window for the first retinal variation split.
+"""Live diagnostic window for the early retinal signal branches.
 
 The UI does not define neural behavior. It shows the camera, measured brightness,
-and the two graded retinal variation branches owned by neural_field.py.
+positive/negative temporal variation, and local spatial contrast owned by
+neural_field.py.
 """
 
 from __future__ import annotations
@@ -12,12 +13,12 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from neural_field import RetinalVariationPathway
+from neural_field import RetinalSignalPathway
 from vision_input import VisualInputExtractor
 
 
 class VisualPlayUI:
-    WINDOW = "Visual Play - Retinal Variation"
+    WINDOW = "Visual Play - Retinal Signals"
     WIDTH = 1440
     HEIGHT = 900
     FIELD_COLS = 256
@@ -29,7 +30,7 @@ class VisualPlayUI:
             rows=self.FIELD_ROWS,
             mirror=True,
         )
-        self.pathway = RetinalVariationPathway(
+        self.pathway = RetinalSignalPathway(
             rows=self.FIELD_ROWS,
             cols=self.FIELD_COLS,
         )
@@ -41,10 +42,11 @@ class VisualPlayUI:
         self.last_brightness: Optional[np.ndarray] = None
         self.last_on_activity: Optional[np.ndarray] = None
         self.last_off_activity: Optional[np.ndarray] = None
+        self.last_contrast_activity: Optional[np.ndarray] = None
 
         self.fps = 0.0
         self._last_time = time.monotonic()
-        self.status = "k camera | p pause | r reset retinal baseline | q quit"
+        self.status = "k camera | p pause | r reset retinal state | q quit"
 
     def _open_camera(self) -> Optional[cv2.VideoCapture]:
         candidates = []
@@ -157,7 +159,7 @@ class VisualPlayUI:
         canvas = self._blank(self.HEIGHT, self.WIDTH, 5)
 
         header_h = 70
-        self._text(canvas, "VISUAL PLAY - FIRST RETINAL SPLIT", 18, 30, 0.66, 2)
+        self._text(canvas, "VISUAL PLAY - EARLY RETINAL SIGNALS", 18, 30, 0.66, 2)
         stats = (
             f"{self.pathway.sensory_location_count:,} sensory locations | "
             f"{self.pathway.neuron_count:,} graded branch neurons | {self.fps:4.1f} FPS"
@@ -166,8 +168,9 @@ class VisualPlayUI:
         self._text(canvas, self.status[:90], 900, 38, 0.36)
 
         gap = 12
-        tile_w = (self.WIDTH - gap * 3) // 2
-        tile_h = (self.HEIGHT - header_h - gap * 3) // 2
+        row_h = (self.HEIGHT - header_h - gap * 3) // 2
+        top_w = (self.WIDTH - gap * 3) // 2
+        bottom_w = (self.WIDTH - gap * 4) // 3
 
         brightness = (
             self._map_to_bgr(self.last_brightness)
@@ -184,50 +187,69 @@ class VisualPlayUI:
             if self.last_off_activity is not None
             else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
+        contrast_activity = (
+            self._map_to_bgr(self.last_contrast_activity)
+            if self.last_contrast_activity is not None
+            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
+        )
 
         resolution = f"{self.FIELD_COLS} x {self.FIELD_ROWS}"
         branch_count = self.pathway.on_field.neuron_count
 
-        tiles = [
+        top_tiles = [
             self._tile(
                 self._camera_image(),
                 "WEBCAM",
                 "physical input",
-                tile_w,
-                tile_h,
+                top_w,
+                row_h,
                 smooth=True,
             ),
             self._tile(
                 brightness,
                 "BRIGHTNESS",
                 f"measured {resolution} luminance",
-                tile_w,
-                tile_h,
+                top_w,
+                row_h,
             ),
+        ]
+        bottom_tiles = [
             self._tile(
                 on_activity,
-                "POSITIVE VARIATION (ON)",
-                f"{branch_count:,} neurons: brighter than each local adapting baseline",
-                tile_w,
-                tile_h,
+                "POSITIVE VARIATION",
+                f"{branch_count:,} neurons: brighter than adapting baseline",
+                bottom_w,
+                row_h,
             ),
             self._tile(
                 off_activity,
-                "NEGATIVE VARIATION (OFF)",
-                f"{branch_count:,} neurons: darker than each local adapting baseline",
-                tile_w,
-                tile_h,
+                "NEGATIVE VARIATION",
+                f"{branch_count:,} neurons: darker than adapting baseline",
+                bottom_w,
+                row_h,
+            ),
+            self._tile(
+                contrast_activity,
+                "LOCAL CONTRAST",
+                f"{branch_count:,} neurons: center vs immediate surround",
+                bottom_w,
+                row_h,
             ),
         ]
 
-        positions = [
-            (gap, header_h + gap),
-            (gap * 2 + tile_w, header_h + gap),
-            (gap, header_h + gap * 2 + tile_h),
-            (gap * 2 + tile_w, header_h + gap * 2 + tile_h),
+        top_y = header_h + gap
+        bottom_y = header_h + gap * 2 + row_h
+        top_positions = [(gap, top_y), (gap * 2 + top_w, top_y)]
+        bottom_positions = [
+            (gap, bottom_y),
+            (gap * 2 + bottom_w, bottom_y),
+            (gap * 3 + bottom_w * 2, bottom_y),
         ]
-        for tile, (x, y) in zip(tiles, positions):
-            canvas[y : y + tile_h, x : x + tile_w] = tile
+
+        for tile, (x, y) in zip(top_tiles, top_positions):
+            canvas[y : y + row_h, x : x + top_w] = tile
+        for tile, (x, y) in zip(bottom_tiles, bottom_positions):
+            canvas[y : y + row_h, x : x + bottom_w] = tile
         return canvas
 
     def reset(self) -> None:
@@ -236,7 +258,8 @@ class VisualPlayUI:
         self.last_brightness = None
         self.last_on_activity = None
         self.last_off_activity = None
-        self.status = "Retinal baseline reset; next frame will seed it."
+        self.last_contrast_activity = None
+        self.status = "Retinal state reset; next frame will seed temporal baseline."
 
     def run(self) -> None:
         cv2.namedWindow(self.WINDOW, cv2.WINDOW_NORMAL)
@@ -263,6 +286,7 @@ class VisualPlayUI:
                         self.last_brightness = visual_input.brightness.copy()
                         self.last_on_activity = result.on_activity
                         self.last_off_activity = result.off_activity
+                        self.last_contrast_activity = result.contrast_activity
 
                 cv2.imshow(self.WINDOW, self.compose())
                 key = cv2.waitKey(1) & 0xFF
