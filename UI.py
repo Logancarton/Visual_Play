@@ -19,16 +19,21 @@ from vision_input import VisualInputExtractor
 
 class VisualPlayUI:
     WINDOW = "Visual Play - Live Neuron Pathway"
-    WIDTH = 1280
-    HEIGHT = 720
+    WIDTH = 1440
+    HEIGHT = 900
+    FIELD_COLS = 256
+    FIELD_ROWS = 144
 
     def __init__(self) -> None:
         self.extractor = VisualInputExtractor(
-            cols=64,
-            rows=36,
+            cols=self.FIELD_COLS,
+            rows=self.FIELD_ROWS,
             mirror=True,
         )
-        self.pathway = VisualNeuronPathway(rows=36, cols=64)
+        self.pathway = VisualNeuronPathway(
+            rows=self.FIELD_ROWS,
+            cols=self.FIELD_COLS,
+        )
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_on = False
@@ -80,12 +85,28 @@ class VisualPlayUI:
         gray = (clean * 255.0).astype(np.uint8)
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-    @staticmethod
-    def _fit(image: np.ndarray, width: int, height: int, *, smooth: bool) -> np.ndarray:
+    @classmethod
+    def _fit(cls, image: np.ndarray, width: int, height: int, *, smooth: bool) -> np.ndarray:
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        interpolation = cv2.INTER_AREA if smooth else cv2.INTER_NEAREST
-        return cv2.resize(image, (width, height), interpolation=interpolation)
+
+        src_h, src_w = image.shape[:2]
+        if src_h < 1 or src_w < 1:
+            return cls._blank(height, width, 4)
+
+        scale = min(width / src_w, height / src_h)
+        fit_w = max(1, int(round(src_w * scale)))
+        fit_h = max(1, int(round(src_h * scale)))
+        interpolation = cv2.INTER_AREA if smooth and scale < 1.0 else (
+            cv2.INTER_LINEAR if smooth else cv2.INTER_NEAREST
+        )
+        resized = cv2.resize(image, (fit_w, fit_h), interpolation=interpolation)
+
+        canvas = cls._blank(height, width, 4)
+        x = (width - fit_w) // 2
+        y = (height - fit_h) // 2
+        canvas[y : y + fit_h, x : x + fit_w] = resized
+        return canvas
 
     @staticmethod
     def _text(
@@ -137,13 +158,13 @@ class VisualPlayUI:
         canvas = self._blank(self.HEIGHT, self.WIDTH, 5)
 
         header_h = 70
-        self._text(canvas, "VISUAL PLAY - REAL NEURON PATHWAY", 18, 30, 0.66, 2)
+        self._text(canvas, "VISUAL PLAY - LIVE MODELED NEURON PATHWAY", 18, 30, 0.66, 2)
         stats = (
-            f"{self.pathway.neuron_count:,} neurons | "
+            f"{self.pathway.neuron_count:,} modeled neurons | "
             f"{self.pathway.synapse_count:,} explicit synapses | {self.fps:4.1f} FPS"
         )
         self._text(canvas, stats, 18, 56, 0.40)
-        self._text(canvas, self.status[:90], 760, 38, 0.36)
+        self._text(canvas, self.status[:90], 900, 38, 0.36)
 
         gap = 12
         tile_w = (self.WIDTH - gap * 3) // 2
@@ -152,18 +173,22 @@ class VisualPlayUI:
         brightness = (
             self._map_to_bgr(self.last_brightness)
             if self.last_brightness is not None
-            else self._blank(100, 100, 4)
+            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
         input_activity = (
             self._map_to_bgr(self.last_input_activity)
             if self.last_input_activity is not None
-            else self._blank(100, 100, 4)
+            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
         downstream = (
             self._map_to_bgr(self.last_downstream_activity)
             if self.last_downstream_activity is not None
-            else self._blank(100, 100, 4)
+            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
+
+        field_count = self.pathway.input_field.neuron_count
+        synapse_count = self.pathway.synapse_count
+        resolution = f"{self.FIELD_COLS} x {self.FIELD_ROWS}"
 
         tiles = [
             self._tile(
@@ -177,21 +202,21 @@ class VisualPlayUI:
             self._tile(
                 brightness,
                 "BRIGHTNESS",
-                "measured 64 x 36 luminance",
+                f"measured {resolution} luminance",
                 tile_w,
                 tile_h,
             ),
             self._tile(
                 input_activity,
                 "NEURON FIELD - DEPTH 0",
-                "2,304 spatial neurons; every cell is one neuron",
+                f"{field_count:,} spatial neurons; every cell is one modeled neuron",
                 tile_w,
                 tile_h,
             ),
             self._tile(
                 downstream,
                 "NEURON FIELD - DEPTH 1",
-                "same neurons reached through 2,304 explicit synapses",
+                f"{field_count:,} downstream neurons driven by {synapse_count:,} explicit synapses",
                 tile_w,
                 tile_h,
             ),
