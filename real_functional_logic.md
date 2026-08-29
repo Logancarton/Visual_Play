@@ -29,6 +29,46 @@ A neuron has a stable identity and spatial location. Functional change should no
 
 Plasticity should normally change connectivity or influence, not physically move a retinotopic neuron. If a receptive field appears to “move,” that should come from changing synaptic influence while the neuron itself retains its identity.
 
+## Refined mechanism definitions
+
+1. **Membrane / activation state** — The neuron's current internal signal level. It integrates incoming influence over time and determines how close the neuron is to responding.
+
+2. **Excitability / threshold** — How much input the neuron needs before it meaningfully activates. Lower threshold means the neuron is easier to recruit.
+
+3. **Adaptation** — A neuron's response gradually weakens when the same stimulation continues, making persistent signals less dominant.
+
+4. **Refractory state** — A temporary reduction in responsiveness immediately after strong activation, preventing uninterrupted repeated firing or activation.
+
+5. **Synaptic influence** — The amount one neuron can affect another through a specific connection.
+
+6. **Excitation** — Synaptic influence that increases the receiving neuron's likelihood or strength of activation.
+
+7. **Inhibition** — Synaptic influence that suppresses or counteracts activation in the receiving neuron.
+
+8. **Synaptic strength** — The persistent weight of a connection; it determines how much of the source neuron's signal reaches its target.
+
+9. **Transmission timing / delay** — How long a signal takes to influence another neuron, allowing temporal relationships and sequence to matter.
+
+10. **Short-term synaptic plasticity** — Temporary changes in connection effectiveness caused by recent use, followed by recovery toward baseline.
+
+11. **Long-term plasticity** — Experience-dependent changes that persist and alter how future signals travel through the network.
+
+12. **Homeostasis** — Slow self-regulation that prevents neurons or networks from becoming permanently overactive or silent.
+
+13. **Structural growth** — Creating new synaptic relationships when repeated activity patterns support a useful connection.
+
+14. **Pruning** — Weakening and eventually removing connections that provide little useful influence.
+
+15. **Modulatory gating** — A separate signal changes whether transmission or learning should be amplified, suppressed, or permitted at that moment.
+
+The central distinction is:
+
+```text
+signal state = what is happening now
+plasticity   = what changes because it happened
+homeostasis  = what keeps those changes stable
+```
+
 ---
 
 ## 1. Current live pathway — IMPLEMENTED
@@ -897,50 +937,3 @@ future propagation changes
 must be demonstrated end to end.
 
 ---
-
-# STATUS LANGUAGE
-
-Use these terms strictly:
-
-```text
-BUILT
-mechanism and focused tests exist
-
-LIVE
-the webcam → neuron pathway actually invokes it
-
-LEARNING
-experience changes persistent functional state that affects later signal flow
-
-STABLE
-learning passes homeostatic / boundedness tests over repeated exposure
-
-STRUCTURALLY PLASTIC
-connections themselves can grow or disappear through a tested rule
-```
-
-Do not describe a configured parameter or visualization as neuroplasticity.
-
----
-
-# Immediate direction
-
-Do not add another generic depth yet.
-
-The next product change should make the existing Depth 0 → Depth 1 connection biologically and computationally richer:
-
-```text
-current:
-1 source neuron → 1 downstream neuron
-
-next:
-local group of source neurons
-        ↓
-explicit competing synapses
-        ↓
-1 downstream neuron
-        ↓
-activity-dependent weight change
-```
-
-This gives Visual_Play its first real mechanism by which experience can alter future visual signal flow.
