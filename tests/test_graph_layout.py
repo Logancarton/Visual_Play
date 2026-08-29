@@ -1,7 +1,7 @@
 import unittest
 
 from experiment_spec import ExperimentSpec
-from graph_layout import apply_grid, relaxed_positions
+from graph_layout import apply_grid, field_depths, grid_positions, relaxed_positions
 
 
 class GraphLayoutTests(unittest.TestCase):
@@ -15,32 +15,43 @@ class GraphLayoutTests(unittest.TestCase):
         spec.add_connection(first.id, right.id)
         spec.add_connection(left.id, deeper.id)
 
-        apply_grid(spec)
-        self.assertNotEqual(left.x, right.x)
-        self.assertLess(first.y, left.y)
-        self.assertLess(left.y, deeper.y)
+        positions = apply_grid(spec)
+        self.assertNotEqual(positions[left.id][0], positions[right.id][0])
+        self.assertLess(positions[first.id][1], positions[left.id][1])
+        self.assertLess(positions[left.id][1], positions[deeper.id][1])
+        depths = field_depths(spec)
+        self.assertEqual(depths[first.id], 0)
+        self.assertEqual(depths[left.id], 1)
+        self.assertEqual(depths[deeper.id], 2)
 
-    def test_runtime_strength_can_change_visual_pull_without_mutating_spec_math(self):
+    def test_runtime_strength_cannot_move_whole_fields(self):
         spec = ExperimentSpec.default()
-        second = spec.add_layer(x=0.90, y=0.90)
+        second = spec.add_layer(name="Second")
         connection = spec.add_connection(spec.layers[0].id, second.id)
-        before = (second.x, second.y)
 
-        weak = relaxed_positions(spec, runtime_strengths={connection.id: 0.1})[second.id]
-        strong = relaxed_positions(spec, runtime_strengths={connection.id: 5.0})[second.id]
+        weak = relaxed_positions(spec, runtime_strengths={connection.id: 0.1})
+        strong = relaxed_positions(spec, runtime_strengths={connection.id: 100.0})
 
-        weak_move = abs(weak[0] - before[0]) + abs(weak[1] - before[1])
-        strong_move = abs(strong[0] - before[0]) + abs(strong[1] - before[1])
-        self.assertGreater(strong_move, weak_move)
+        self.assertEqual(weak, strong)
+        self.assertEqual(weak, grid_positions(spec))
         self.assertEqual(connection.gain, 1.0)
 
-    def test_pinned_layer_does_not_move(self):
+    def test_second_field_is_next_structural_depth(self):
         spec = ExperimentSpec.default()
-        layer = spec.layers[0]
-        layer.pinned = True
-        before = (layer.x, layer.y)
-        after = relaxed_positions(spec)[layer.id]
-        self.assertEqual(before, after)
+        second = spec.add_layer(name="Second")
+        spec.add_connection(spec.layers[0].id, second.id)
+        positions = grid_positions(spec)
+        self.assertLess(positions[spec.layers[0].id][1], positions[second.id][1])
+
+    def test_recurrent_cycle_is_grouped_without_infinite_depth(self):
+        spec = ExperimentSpec.default()
+        second = spec.add_layer(name="Second")
+        third = spec.add_layer(name="Third")
+        spec.add_connection(spec.layers[0].id, second.id)
+        spec.add_connection(second.id, third.id)
+        spec.add_connection(third.id, second.id)
+        depths = field_depths(spec)
+        self.assertLessEqual(max(depths.values()), len(spec.layers))
 
 
 if __name__ == "__main__":
