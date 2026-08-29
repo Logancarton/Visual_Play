@@ -1,8 +1,7 @@
-"""Minimal live diagnostic window for the real Visual_Play signal path.
+"""Minimal live diagnostic window for the first retinal variation split.
 
-The UI does not define neural structure. It only shows the camera, measured
-brightness, and the two real spatial neuron-field activity maps owned by
-neural_field.py.
+The UI does not define neural behavior. It shows the camera, measured brightness,
+and the two graded retinal variation branches owned by neural_field.py.
 """
 
 from __future__ import annotations
@@ -13,12 +12,12 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from neural_field import VisualNeuronPathway
+from neural_field import RetinalVariationPathway
 from vision_input import VisualInputExtractor
 
 
 class VisualPlayUI:
-    WINDOW = "Visual Play - Live Neuron Pathway"
+    WINDOW = "Visual Play - Retinal Variation"
     WIDTH = 1440
     HEIGHT = 900
     FIELD_COLS = 256
@@ -30,7 +29,7 @@ class VisualPlayUI:
             rows=self.FIELD_ROWS,
             mirror=True,
         )
-        self.pathway = VisualNeuronPathway(
+        self.pathway = RetinalVariationPathway(
             rows=self.FIELD_ROWS,
             cols=self.FIELD_COLS,
         )
@@ -40,12 +39,12 @@ class VisualPlayUI:
         self.paused = False
         self.last_frame: Optional[np.ndarray] = None
         self.last_brightness: Optional[np.ndarray] = None
-        self.last_input_activity: Optional[np.ndarray] = None
-        self.last_downstream_activity: Optional[np.ndarray] = None
+        self.last_on_activity: Optional[np.ndarray] = None
+        self.last_off_activity: Optional[np.ndarray] = None
 
         self.fps = 0.0
-        self._last_time = time.time()
-        self.status = "k camera | p pause | r reset neural state | q quit"
+        self._last_time = time.monotonic()
+        self.status = "k camera | p pause | r reset retinal baseline | q quit"
 
     def _open_camera(self) -> Optional[cv2.VideoCapture]:
         candidates = []
@@ -158,10 +157,10 @@ class VisualPlayUI:
         canvas = self._blank(self.HEIGHT, self.WIDTH, 5)
 
         header_h = 70
-        self._text(canvas, "VISUAL PLAY - LIVE MODELED NEURON PATHWAY", 18, 30, 0.66, 2)
+        self._text(canvas, "VISUAL PLAY - FIRST RETINAL SPLIT", 18, 30, 0.66, 2)
         stats = (
-            f"{self.pathway.neuron_count:,} modeled neurons | "
-            f"{self.pathway.synapse_count:,} explicit synapses | {self.fps:4.1f} FPS"
+            f"{self.pathway.sensory_location_count:,} sensory locations | "
+            f"{self.pathway.neuron_count:,} graded branch neurons | {self.fps:4.1f} FPS"
         )
         self._text(canvas, stats, 18, 56, 0.40)
         self._text(canvas, self.status[:90], 900, 38, 0.36)
@@ -175,20 +174,19 @@ class VisualPlayUI:
             if self.last_brightness is not None
             else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
-        input_activity = (
-            self._map_to_bgr(self.last_input_activity)
-            if self.last_input_activity is not None
+        on_activity = (
+            self._map_to_bgr(self.last_on_activity)
+            if self.last_on_activity is not None
             else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
-        downstream = (
-            self._map_to_bgr(self.last_downstream_activity)
-            if self.last_downstream_activity is not None
+        off_activity = (
+            self._map_to_bgr(self.last_off_activity)
+            if self.last_off_activity is not None
             else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
         )
 
-        field_count = self.pathway.input_field.neuron_count
-        synapse_count = self.pathway.synapse_count
         resolution = f"{self.FIELD_COLS} x {self.FIELD_ROWS}"
+        branch_count = self.pathway.on_field.neuron_count
 
         tiles = [
             self._tile(
@@ -207,16 +205,16 @@ class VisualPlayUI:
                 tile_h,
             ),
             self._tile(
-                input_activity,
-                "NEURON FIELD - DEPTH 0",
-                f"{field_count:,} spatial neurons; every cell is one modeled neuron",
+                on_activity,
+                "POSITIVE VARIATION (ON)",
+                f"{branch_count:,} neurons: brighter than each local adapting baseline",
                 tile_w,
                 tile_h,
             ),
             self._tile(
-                downstream,
-                "NEURON FIELD - DEPTH 1",
-                f"{field_count:,} downstream neurons driven by {synapse_count:,} explicit synapses",
+                off_activity,
+                "NEGATIVE VARIATION (OFF)",
+                f"{branch_count:,} neurons: darker than each local adapting baseline",
                 tile_w,
                 tile_h,
             ),
@@ -236,9 +234,9 @@ class VisualPlayUI:
         self.extractor.reset()
         self.pathway.reset()
         self.last_brightness = None
-        self.last_input_activity = None
-        self.last_downstream_activity = None
-        self.status = "Sensory history and neural state reset."
+        self.last_on_activity = None
+        self.last_off_activity = None
+        self.status = "Retinal baseline reset; next frame will seed it."
 
     def run(self) -> None:
         cv2.namedWindow(self.WINDOW, cv2.WINDOW_NORMAL)
@@ -248,7 +246,7 @@ class VisualPlayUI:
         try:
             running = True
             while running:
-                now = time.time()
+                now = time.monotonic()
                 dt = max(now - self._last_time, 1e-6)
                 self._last_time = now
                 self.fps = 0.90 * self.fps + 0.10 * (1.0 / dt)
@@ -258,10 +256,13 @@ class VisualPlayUI:
                     if ok:
                         self.last_frame = frame.copy()
                         visual_input = self.extractor.extract(frame)
-                        result = self.pathway.process(visual_input.brightness)
+                        result = self.pathway.process(
+                            visual_input.brightness,
+                            timestamp_ms=now * 1000.0,
+                        )
                         self.last_brightness = visual_input.brightness.copy()
-                        self.last_input_activity = result.input_activity
-                        self.last_downstream_activity = result.downstream_activity
+                        self.last_on_activity = result.on_activity
+                        self.last_off_activity = result.off_activity
 
                 cv2.imshow(self.WINDOW, self.compose())
                 key = cv2.waitKey(1) & 0xFF
