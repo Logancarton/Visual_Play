@@ -19,16 +19,17 @@ WEBCAM
 36,864 spatial sensory locations
   ↓
   ├─ TEMPORAL VARIATION
-  │      ├─ POSITIVE VARIATION   36,864 neurons
-  │      └─ NEGATIVE VARIATION   36,864 neurons
+  │      ├─ POSITIVE VARIATION    36,864 neurons
+  │      └─ NEGATIVE VARIATION    36,864 neurons
   │
-  ├─ LOCAL SPATIAL CONTRAST      36,864 neurons
+  ├─ LOCAL SPATIAL CONTRAST       36,864 neurons
   │
-  └─ ONE DIRECTIONAL FLOW
-         LEFT -> RIGHT            36,864 neurons
+  └─ HORIZONTAL DIRECTIONAL FLOW
+         ├─ LEFTWARD FLOW         36,864 neurons
+         └─ RIGHTWARD FLOW        36,864 neurons
 ```
 
-The live system therefore has 36,864 sensory locations and 147,456 graded branch neurons.
+The live system therefore has 36,864 sensory locations and 184,320 graded branch neurons.
 
 None of these branches are discrete spikes.
 
@@ -87,48 +88,54 @@ Uniform regions produce approximately zero contrast. Boundaries produce stronger
 
 ---
 
-# 4. FIRST DIRECTIONAL FLOW — LEFT TO RIGHT
+# 4. HORIZONTAL DIRECTIONAL FLOW — LEFT AND RIGHT
 
-This is the first mechanism that combines spatial relationship with temporal order.
+This mechanism combines spatial relationship with temporal order.
 
 It does not compare raw pictures and it does not use optical flow. It consumes the already-live positive and negative temporal-variation branches.
 
-Each horizontal pair uses the same opponent correlation equation.
+Each adjacent horizontal pair uses one shared opponent calculation.
 
-For target location `(x,y)` with the neighbor immediately to its left:
+For a pair consisting of a left location `L` and right location `R`:
 
 ```text
-preferred =
-      delayed_positive[x-1,y] * current_positive[x,y]
-    + delayed_negative[x-1,y] * current_negative[x,y]
+right_evidence =
+      delayed_positive[L] * current_positive[R]
+    + delayed_negative[L] * current_negative[R]
 
-opponent =
-      delayed_positive[x,y] * current_positive[x-1,y]
-    + delayed_negative[x,y] * current_negative[x-1,y]
+left_evidence =
+      delayed_positive[R] * current_positive[L]
+    + delayed_negative[R] * current_negative[L]
 
-rightward[x,y]
-    = clip(flow_gain * max(preferred - opponent, 0), 0, 1)
+pair_signal = flow_gain * (right_evidence - left_evidence)
+
+rightward[R] = clip( pair_signal, 0, 1)
+leftward[L]  = clip(-pair_signal, 0, 1)
 ```
 
 Interpretation:
 
 ```text
-change at left
-      ↓
-short delay
-      ↓
-same-polarity change at right
-      ↓
-RIGHTWARD FLOW activity
+change on left
+    ↓ short delay
+same-polarity change on right
+    ↓
+RIGHTWARD FLOW
+
+change on right
+    ↓ short delay
+same-polarity change on left
+    ↓
+LEFTWARD FLOW
 ```
 
-The reverse temporal order contributes to the opponent term and suppresses the rightward response.
+The two directions are true opponents. Evidence for one direction suppresses the other because they are generated from the same signed pair signal rather than from two unrelated detectors.
 
 A simultaneous change at both locations tends to cancel rather than being mislabeled as motion.
 
-Both bright and dark moving changes can drive the same direction field because positive and negative variation are correlated separately before being combined.
+Both bright and dark moving changes can drive either direction because positive and negative variation are correlated separately before being combined.
 
-The delayed state is a low-pass temporal trace:
+The delayed state is one shared low-pass temporal trace:
 
 ```text
 trace(t+1) = trace(t) + alpha * (current_activity - trace(t))
@@ -142,7 +149,7 @@ Current constants:
 flow trace time constant = 100 ms
 flow gain                = 4.0
 spatial offset           = 1 horizontal cell
-preferred direction      = left -> right only
+preferred directions     = left <-> right
 ```
 
 This is a deliberately minimal opponent temporal-correlation detector. It is not claimed to be a complete biological retinal direction-selective circuit.
@@ -161,14 +168,15 @@ last update timestamp
 positive-variation field
 negative-variation field
 local-contrast field
-rightward directional-flow owner
+horizontal directional-flow owner
 ```
 
-`DirectionalFlowField` owns:
+`HorizontalDirectionalFlowField` owns:
 
 ```text
-positive temporal trace
-negative temporal trace
+shared positive temporal trace
+shared negative temporal trace
+leftward output field
 rightward output field
 flow trace timing
 ```
@@ -180,7 +188,6 @@ The UI only observes these arrays.
 # 6. NOT YET LIVE
 
 ```text
-right -> left flow
 upward flow
 downward flow
 diagonal directions
@@ -193,8 +200,6 @@ homeostatic regulation
 structural growth / pruning
 ```
 
-Do not add the other directions until this first directional detector behaves correctly in live play.
-
 ---
 
 # 7. CURRENT TEST GATE
@@ -204,25 +209,25 @@ The live path must prove:
 ```text
 left change then right change
    ↓
-rightward response
+rightward response, leftward quiet
 
 right change then left change
    ↓
-no rightward response
+leftward response, rightward quiet
 
 simultaneous adjacent change
    ↓
-opponent cancellation
+both directions cancel
 
-dark left-to-right change
+dark horizontal motion
    ↓
-rightward response
+correct direction response
 
 live brightness sequence
    ↓
 variation branches
    ↓
-rightward field
+correct horizontal direction field
 
 malformed input or backward time
    ↓
