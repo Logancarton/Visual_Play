@@ -2,7 +2,7 @@
 
 The UI does not define neural behavior. It shows the camera, measured brightness,
 positive/negative temporal variation, local spatial contrast, and paired
-horizontal directional-flow fields owned by neural_field.py.
+horizontal and vertical directional-flow fields owned by neural_field.py.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ class VisualPlayUI:
         self.last_contrast_activity: Optional[np.ndarray] = None
         self.last_rightward_activity: Optional[np.ndarray] = None
         self.last_leftward_activity: Optional[np.ndarray] = None
+        self.last_downward_activity: Optional[np.ndarray] = None
+        self.last_upward_activity: Optional[np.ndarray] = None
 
         self.fps = 0.0
         self._last_time = time.monotonic()
@@ -179,6 +181,7 @@ class VisualPlayUI:
         lower_h = (self.HEIGHT - header_h - top_h - gap * 4) // 2
         half_w = (self.WIDTH - gap * 3) // 2
         third_w = (self.WIDTH - gap * 4) // 3
+        quarter_w = (self.WIDTH - gap * 5) // 4
 
         brightness = self._map_or_blank(self.last_brightness)
         on_activity = self._map_or_blank(self.last_on_activity)
@@ -186,6 +189,8 @@ class VisualPlayUI:
         contrast_activity = self._map_or_blank(self.last_contrast_activity)
         rightward_activity = self._map_or_blank(self.last_rightward_activity)
         leftward_activity = self._map_or_blank(self.last_leftward_activity)
+        downward_activity = self._map_or_blank(self.last_downward_activity)
+        upward_activity = self._map_or_blank(self.last_upward_activity)
 
         resolution = f"{self.FIELD_COLS} x {self.FIELD_ROWS}"
         branch_count = self.pathway.on_field.neuron_count
@@ -235,14 +240,28 @@ class VisualPlayUI:
                 leftward_activity,
                 "<-  LEFTWARD FLOW",
                 f"{branch_count:,} neurons: right-before-left opponent timing",
-                half_w,
+                quarter_w,
                 lower_h,
             ),
             self._tile(
                 rightward_activity,
                 "RIGHTWARD FLOW  ->",
                 f"{branch_count:,} neurons: left-before-right opponent timing",
-                half_w,
+                quarter_w,
+                lower_h,
+            ),
+            self._tile(
+                upward_activity,
+                "UPWARD FLOW",
+                f"{branch_count:,} neurons: bottom-before-top opponent timing",
+                quarter_w,
+                lower_h,
+            ),
+            self._tile(
+                downward_activity,
+                "DOWNWARD FLOW",
+                f"{branch_count:,} neurons: top-before-bottom opponent timing",
+                quarter_w,
                 lower_h,
             ),
         ]
@@ -258,8 +277,8 @@ class VisualPlayUI:
             x = gap + index * (third_w + gap)
             canvas[middle_y:middle_y + lower_h, x:x + third_w] = tile
         for index, tile in enumerate(flow_tiles):
-            x = gap + index * (half_w + gap)
-            canvas[flow_y:flow_y + lower_h, x:x + half_w] = tile
+            x = gap + index * (quarter_w + gap)
+            canvas[flow_y:flow_y + lower_h, x:x + quarter_w] = tile
         return canvas
 
     def reset(self) -> None:
@@ -271,6 +290,8 @@ class VisualPlayUI:
         self.last_contrast_activity = None
         self.last_rightward_activity = None
         self.last_leftward_activity = None
+        self.last_downward_activity = None
+        self.last_upward_activity = None
         self.status = "Retinal state reset; next frame will seed temporal baseline."
 
     def run(self) -> None:
@@ -301,6 +322,8 @@ class VisualPlayUI:
                         self.last_contrast_activity = result.contrast_activity
                         self.last_rightward_activity = result.rightward_activity
                         self.last_leftward_activity = result.leftward_activity
+                        self.last_downward_activity = result.downward_activity
+                        self.last_upward_activity = result.upward_activity
 
                 cv2.imshow(self.WINDOW, self.compose())
                 key = cv2.waitKey(1) & 0xFF

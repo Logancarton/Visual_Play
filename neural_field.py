@@ -301,6 +301,130 @@ class HorizontalDirectionalFlowField:
 
 
 @dataclass(frozen=True)
+class VerticalFlowSnapshot:
+    downward_activity: np.ndarray
+    upward_activity: np.ndarray
+    on_trace: np.ndarray
+    off_trace: np.ndarray
+    timestamp_ms: float
+
+
+class VerticalDirectionalFlowField:
+    """Paired up/down opponent detector sharing one temporal trace state."""
+
+    def __init__(
+        self,
+        rows: int,
+        cols: int,
+        *,
+        trace_tau_ms: float = 100.0,
+        flow_gain: float = 4.0,
+    ) -> None:
+        if rows < 1 or cols < 1:
+            raise ValueError("rows and cols must be >= 1")
+        if trace_tau_ms <= 0.0 or flow_gain <= 0.0:
+            raise ValueError("trace_tau_ms and flow_gain must be > 0")
+
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.trace_tau_ms = float(trace_tau_ms)
+        self.flow_gain = float(flow_gain)
+        kwargs = dict(threshold=0.0, leak=1.0, max_potential=1.0)
+        self.downward_field = SpatialNeuronField(rows, cols, **kwargs)
+        self.upward_field = SpatialNeuronField(rows, cols, **kwargs)
+        self.on_trace = np.zeros((rows, cols), dtype=np.float32)
+        self.off_trace = np.zeros((rows, cols), dtype=np.float32)
+        self._last_timestamp_ms: float | None = None
+
+    @property
+    def neuron_count(self) -> int:
+        return self.downward_field.neuron_count + self.upward_field.neuron_count
+
+    def _coerce(self, values: np.ndarray, name: str) -> np.ndarray:
+        activity = np.asarray(values, dtype=np.float32)
+        if activity.shape != (self.rows, self.cols):
+            raise ValueError(
+                f"{name} must have shape {(self.rows, self.cols)}, got {activity.shape}"
+            )
+        if not np.all(np.isfinite(activity)):
+            raise ValueError(f"{name} must contain only finite values")
+        return np.clip(activity, 0.0, 1.0)
+
+    def process(
+        self,
+        on_activity: np.ndarray,
+        off_activity: np.ndarray,
+        *,
+        timestamp_ms: float,
+    ) -> VerticalFlowSnapshot:
+        on = self._coerce(on_activity, "on_activity")
+        off = self._coerce(off_activity, "off_activity")
+        now_ms = float(timestamp_ms)
+        if not math.isfinite(now_ms):
+            raise ValueError("timestamp_ms must be finite")
+        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
+            raise ValueError("timestamp_ms cannot move backward")
+
+        if self._last_timestamp_ms is None:
+            zeros = np.zeros((self.rows, self.cols), dtype=np.float32)
+            self.downward_field.step(zeros)
+            self.upward_field.step(zeros)
+            self.on_trace = on.copy()
+            self.off_trace = off.copy()
+            self._last_timestamp_ms = now_ms
+            return self.snapshot(now_ms)
+
+        down_evidence = (
+            self.on_trace[:-1, :] * on[1:, :]
+            + self.off_trace[:-1, :] * off[1:, :]
+        )
+        up_evidence = (
+            self.on_trace[1:, :] * on[:-1, :]
+            + self.off_trace[1:, :] * off[:-1, :]
+        )
+        opponent_pair = (down_evidence - up_evidence) * self.flow_gain
+
+        down_drive = np.zeros((self.rows, self.cols), dtype=np.float32)
+        up_drive = np.zeros((self.rows, self.cols), dtype=np.float32)
+        down_drive[1:, :] = np.clip(opponent_pair, 0.0, 1.0)
+        up_drive[:-1, :] = np.clip(-opponent_pair, 0.0, 1.0)
+
+        down = self.downward_field.step(down_drive)
+        up = self.upward_field.step(up_drive)
+
+        dt_ms = now_ms - self._last_timestamp_ms
+        alpha = 1.0 - math.exp(-dt_ms / self.trace_tau_ms) if dt_ms > 0.0 else 0.0
+        self.on_trace += alpha * (on - self.on_trace)
+        self.off_trace += alpha * (off - self.off_trace)
+        self._last_timestamp_ms = now_ms
+
+        return VerticalFlowSnapshot(
+            down.activity.reshape(self.rows, self.cols),
+            up.activity.reshape(self.rows, self.cols),
+            self.on_trace.copy(),
+            self.off_trace.copy(),
+            now_ms,
+        )
+
+    def snapshot(self, timestamp_ms: float | None = None) -> VerticalFlowSnapshot:
+        now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+        return VerticalFlowSnapshot(
+            self.downward_field.activity_map().copy(),
+            self.upward_field.activity_map().copy(),
+            self.on_trace.copy(),
+            self.off_trace.copy(),
+            0.0 if now_ms is None else float(now_ms),
+        )
+
+    def reset(self) -> None:
+        self.downward_field.reset()
+        self.upward_field.reset()
+        self.on_trace.fill(0.0)
+        self.off_trace.fill(0.0)
+        self._last_timestamp_ms = None
+
+
+@dataclass(frozen=True)
 class RetinalSignalSnapshot:
     baseline: np.ndarray
     on_activity: np.ndarray
@@ -308,11 +432,13 @@ class RetinalSignalSnapshot:
     contrast_activity: np.ndarray
     rightward_activity: np.ndarray
     leftward_activity: np.ndarray
+    downward_activity: np.ndarray
+    upward_activity: np.ndarray
     timestamp_ms: float
 
 
 class RetinalSignalPathway:
-    """Live brightness -> variation, contrast, and horizontal flow path."""
+    """Live brightness -> variation, contrast, and paired directional flow."""
 
     def __init__(
         self,
@@ -353,6 +479,12 @@ class RetinalSignalPathway:
             trace_tau_ms=flow_trace_tau_ms,
             flow_gain=flow_gain,
         )
+        self.vertical_flow = VerticalDirectionalFlowField(
+            rows,
+            cols,
+            trace_tau_ms=flow_trace_tau_ms,
+            flow_gain=flow_gain,
+        )
         self.baseline = np.zeros((rows, cols), dtype=np.float32)
         self._initialized = False
         self._last_timestamp_ms: float | None = None
@@ -364,6 +496,7 @@ class RetinalSignalPathway:
             + self.off_field.neuron_count
             + self.contrast_field.neuron_count
             + self.horizontal_flow.neuron_count
+            + self.vertical_flow.neuron_count
         )
 
     def _coerce_luminance(self, brightness: np.ndarray) -> np.ndarray:
@@ -415,7 +548,12 @@ class RetinalSignalPathway:
             self._last_timestamp_ms = now_ms
             self.on_field.reset()
             self.off_field.reset()
-            flow = self.horizontal_flow.process(
+            horizontal_flow = self.horizontal_flow.process(
+                self.on_field.activity_map(),
+                self.off_field.activity_map(),
+                timestamp_ms=now_ms,
+            )
+            vertical_flow = self.vertical_flow.process(
                 self.on_field.activity_map(),
                 self.off_field.activity_map(),
                 timestamp_ms=now_ms,
@@ -425,8 +563,10 @@ class RetinalSignalPathway:
                 self.on_field.activity_map().copy(),
                 self.off_field.activity_map().copy(),
                 contrast.activity.reshape(self.rows, self.cols),
-                flow.rightward_activity,
-                flow.leftward_activity,
+                horizontal_flow.rightward_activity,
+                horizontal_flow.leftward_activity,
+                vertical_flow.downward_activity,
+                vertical_flow.upward_activity,
                 now_ms,
             )
 
@@ -435,7 +575,12 @@ class RetinalSignalPathway:
         off = self.off_field.step(np.clip(-delta * self.response_gain, 0.0, 1.0))
         on_map = on.activity.reshape(self.rows, self.cols)
         off_map = off.activity.reshape(self.rows, self.cols)
-        flow = self.horizontal_flow.process(on_map, off_map, timestamp_ms=now_ms)
+        horizontal_flow = self.horizontal_flow.process(
+            on_map, off_map, timestamp_ms=now_ms
+        )
+        vertical_flow = self.vertical_flow.process(
+            on_map, off_map, timestamp_ms=now_ms
+        )
 
         dt_ms = now_ms - self._last_timestamp_ms
         alpha = (
@@ -451,8 +596,10 @@ class RetinalSignalPathway:
             on_map,
             off_map,
             contrast.activity.reshape(self.rows, self.cols),
-            flow.rightward_activity,
-            flow.leftward_activity,
+            horizontal_flow.rightward_activity,
+            horizontal_flow.leftward_activity,
+            vertical_flow.downward_activity,
+            vertical_flow.upward_activity,
             now_ms,
         )
 
@@ -465,6 +612,8 @@ class RetinalSignalPathway:
             self.contrast_field.activity_map().copy(),
             self.horizontal_flow.rightward_field.activity_map().copy(),
             self.horizontal_flow.leftward_field.activity_map().copy(),
+            self.vertical_flow.downward_field.activity_map().copy(),
+            self.vertical_flow.upward_field.activity_map().copy(),
             0.0 if now_ms is None else float(now_ms),
         )
 
@@ -474,5 +623,6 @@ class RetinalSignalPathway:
         self.off_field.reset()
         self.contrast_field.reset()
         self.horizontal_flow.reset()
+        self.vertical_flow.reset()
         self._initialized = False
         self._last_timestamp_ms = None

@@ -24,12 +24,16 @@ WEBCAM
   │
   ├─ LOCAL SPATIAL CONTRAST       36,864 neurons
   │
-  └─ HORIZONTAL DIRECTIONAL FLOW
-         ├─ LEFTWARD FLOW         36,864 neurons
-         └─ RIGHTWARD FLOW        36,864 neurons
+  ├─ HORIZONTAL DIRECTIONAL FLOW
+  │      ├─ LEFTWARD FLOW         36,864 neurons
+  │      └─ RIGHTWARD FLOW        36,864 neurons
+  │
+  └─ VERTICAL DIRECTIONAL FLOW
+         ├─ UPWARD FLOW           36,864 neurons
+         └─ DOWNWARD FLOW         36,864 neurons
 ```
 
-The live system therefore has 36,864 sensory locations and 184,320 graded branch neurons.
+The live system therefore has 36,864 sensory locations and 258,048 graded branch neurons.
 
 None of these branches are discrete spikes.
 
@@ -156,7 +160,45 @@ This is a deliberately minimal opponent temporal-correlation detector. It is not
 
 ---
 
-# 5. LIVE OWNERSHIP
+# 5. VERTICAL DIRECTIONAL FLOW — UP AND DOWN
+
+Vertical flow uses the same timing rule as horizontal flow, but only across adjacent rows. It consumes the positive and negative temporal-variation branches; it does not compare raw pictures.
+
+For a pair consisting of a top location `T` and bottom location `B` in the same column:
+
+```text
+down_evidence =
+      delayed_positive[T] * current_positive[B]
+    + delayed_negative[T] * current_negative[B]
+
+up_evidence =
+      delayed_positive[B] * current_positive[T]
+    + delayed_negative[B] * current_negative[T]
+
+pair_signal = flow_gain * (down_evidence - up_evidence)
+
+downward[B] = clip( pair_signal, 0, 1)
+upward[T]   = clip(-pair_signal, 0, 1)
+```
+
+The sign convention is therefore explicit: positive signed evidence means top-to-bottom motion and drives the downward field; negative signed evidence means bottom-to-top motion and drives the upward field.
+
+The two vertical directions share one positive temporal trace and one negative temporal trace. Simultaneous change at both members of a pair cancels in the opponent subtraction. Bright and dark moving changes are correlated separately, so either polarity can drive either direction.
+
+Vertical flow uses the same trace update and constants as horizontal flow:
+
+```text
+flow trace time constant = 100 ms
+flow gain                = 4.0
+spatial offset           = 1 vertical cell
+preferred directions     = up <-> down
+```
+
+This is the vertical counterpart of the same minimal opponent temporal-correlation mechanism, not a complete optical-flow system.
+
+---
+
+# 6. LIVE OWNERSHIP
 
 `RetinalSignalPathway` sequences the live branches.
 
@@ -169,6 +211,7 @@ positive-variation field
 negative-variation field
 local-contrast field
 horizontal directional-flow owner
+vertical directional-flow owner
 ```
 
 `HorizontalDirectionalFlowField` owns:
@@ -181,15 +224,23 @@ rightward output field
 flow trace timing
 ```
 
+`VerticalDirectionalFlowField` owns:
+
+```text
+shared positive temporal trace
+shared negative temporal trace
+upward output field
+downward output field
+flow trace timing
+```
+
 The UI only observes these arrays.
 
 ---
 
-# 6. NOT YET LIVE
+# 7. NOT YET LIVE
 
 ```text
-upward flow
-downward flow
 diagonal directions
 discrete firing
 per-fire timestamps
@@ -202,7 +253,7 @@ structural growth / pruning
 
 ---
 
-# 7. CURRENT TEST GATE
+# 8. CURRENT TEST GATE
 
 The live path must prove:
 
@@ -223,11 +274,27 @@ dark horizontal motion
    ↓
 correct direction response
 
+top change then bottom change
+   ↓
+downward response, upward quiet
+
+bottom change then top change
+   ↓
+upward response, downward quiet
+
+simultaneous adjacent vertical change
+   ↓
+both vertical directions cancel
+
+dark vertical motion
+   ↓
+correct vertical direction response
+
 live brightness sequence
    ↓
 variation branches
    ↓
-correct horizontal direction field
+correct horizontal or vertical direction field
 
 malformed input or backward time
    ↓

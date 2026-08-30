@@ -7,6 +7,7 @@ from neural_field import (
     RetinalSignalPathway,
     SpatialNeuronField,
     SynapseProjection,
+    VerticalDirectionalFlowField,
 )
 from vision_input import VisualInputExtractor
 
@@ -147,6 +148,94 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_array_equal(after.off_trace, before.off_trace)
 
 
+class VerticalDirectionalFlowFieldTests(unittest.TestCase):
+    def test_top_to_bottom_positive_sequence_activates_only_downward_field(self):
+        field = VerticalDirectionalFlowField(
+            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        )
+        off = np.zeros((4, 1), dtype=np.float32)
+        field.process(
+            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            off,
+            timestamp_ms=0.0,
+        )
+        result = field.process(
+            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            off,
+            timestamp_ms=20.0,
+        )
+        self.assertGreater(float(result.downward_activity[1, 0]), 0.0)
+        np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
+
+    def test_bottom_to_top_positive_sequence_activates_only_upward_field(self):
+        field = VerticalDirectionalFlowField(
+            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        )
+        off = np.zeros((4, 1), dtype=np.float32)
+        field.process(
+            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            off,
+            timestamp_ms=0.0,
+        )
+        result = field.process(
+            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            off,
+            timestamp_ms=20.0,
+        )
+        self.assertGreater(float(result.upward_activity[0, 0]), 0.0)
+        np.testing.assert_allclose(result.downward_activity, 0.0, atol=1e-7)
+
+    def test_synchronous_vertical_neighbor_change_cancels_both_directions(self):
+        field = VerticalDirectionalFlowField(
+            3, 1, trace_tau_ms=100.0, flow_gain=2.0
+        )
+        off = np.zeros((3, 1), dtype=np.float32)
+        simultaneous = np.array([[1.0], [1.0], [0.0]], dtype=np.float32)
+        field.process(simultaneous, off, timestamp_ms=0.0)
+        result = field.process(simultaneous, off, timestamp_ms=20.0)
+        np.testing.assert_allclose(result.downward_activity, 0.0, atol=1e-7)
+        np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
+
+    def test_dark_change_can_drive_downward_direction(self):
+        field = VerticalDirectionalFlowField(
+            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        )
+        on = np.zeros((4, 1), dtype=np.float32)
+        field.process(
+            on,
+            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            timestamp_ms=0.0,
+        )
+        result = field.process(
+            on,
+            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            timestamp_ms=20.0,
+        )
+        self.assertGreater(float(result.downward_activity[1, 0]), 0.0)
+        np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
+
+    def test_bad_shape_and_backward_time_do_not_corrupt_flow_state(self):
+        field = VerticalDirectionalFlowField(3, 1)
+        zeros = np.zeros((3, 1), dtype=np.float32)
+        field.process(zeros, zeros, timestamp_ms=100.0)
+        before = field.snapshot()
+        with self.assertRaises(ValueError):
+            field.process(
+                np.zeros((3, 2), dtype=np.float32),
+                zeros,
+                timestamp_ms=110.0,
+            )
+        with self.assertRaises(ValueError):
+            field.process(zeros, zeros, timestamp_ms=90.0)
+        after = field.snapshot()
+        np.testing.assert_array_equal(
+            after.downward_activity, before.downward_activity
+        )
+        np.testing.assert_array_equal(after.upward_activity, before.upward_activity)
+        np.testing.assert_array_equal(after.on_trace, before.on_trace)
+        np.testing.assert_array_equal(after.off_trace, before.off_trace)
+
+
 class RetinalSignalPathwayTests(unittest.TestCase):
     def test_first_frame_seeds_temporal_baseline_without_fabricating_variation_or_flow(self):
         pathway = RetinalSignalPathway(2, 3)
@@ -159,7 +248,9 @@ class RetinalSignalPathwayTests(unittest.TestCase):
         self.assertTrue(np.all(result.off_activity == 0.0))
         self.assertTrue(np.all(result.rightward_activity == 0.0))
         self.assertTrue(np.all(result.leftward_activity == 0.0))
-        self.assertEqual(pathway.neuron_count, 30)
+        self.assertTrue(np.all(result.downward_activity == 0.0))
+        self.assertTrue(np.all(result.upward_activity == 0.0))
+        self.assertEqual(pathway.neuron_count, 42)
 
     def test_each_location_splits_brighter_and_darker_change_independently(self):
         pathway = RetinalSignalPathway(1, 3, response_gain=2.0)
@@ -262,6 +353,26 @@ class RetinalSignalPathwayTests(unittest.TestCase):
         self.assertGreater(float(result.leftward_activity[0, 0]), 0.0)
         np.testing.assert_allclose(result.rightward_activity, 0.0, atol=1e-7)
 
+    def test_live_brightness_sequence_reaches_downward_branch_only(self):
+        pathway = RetinalSignalPathway(
+            4,
+            2,
+            baseline_tau_ms=1000.0,
+            response_gain=3.0,
+            flow_trace_tau_ms=100.0,
+            flow_gain=4.0,
+        )
+        neutral = np.full((4, 2), 0.5, dtype=np.float32)
+        top = neutral.copy()
+        bottom = neutral.copy()
+        top[0, 0] = 1.0
+        bottom[1, 0] = 1.0
+        pathway.process(neutral, timestamp_ms=0.0)
+        pathway.process(top, timestamp_ms=20.0)
+        result = pathway.process(bottom, timestamp_ms=40.0)
+        self.assertGreater(float(result.downward_activity[1, 0]), 0.0)
+        np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
+
     def test_bad_input_fails_without_mutating_retinal_state(self):
         pathway = RetinalSignalPathway(2, 2)
         pathway.process(
@@ -287,6 +398,10 @@ class RetinalSignalPathwayTests(unittest.TestCase):
         np.testing.assert_array_equal(
             after.leftward_activity, before.leftward_activity
         )
+        np.testing.assert_array_equal(
+            after.downward_activity, before.downward_activity
+        )
+        np.testing.assert_array_equal(after.upward_activity, before.upward_activity)
 
     def test_backward_time_fails_without_mutating_retinal_state(self):
         pathway = RetinalSignalPathway(1, 2)
@@ -313,6 +428,10 @@ class RetinalSignalPathwayTests(unittest.TestCase):
         np.testing.assert_array_equal(
             after.leftward_activity, before.leftward_activity
         )
+        np.testing.assert_array_equal(
+            after.downward_activity, before.downward_activity
+        )
+        np.testing.assert_array_equal(after.upward_activity, before.upward_activity)
 
 
 class VisualInputTests(unittest.TestCase):
