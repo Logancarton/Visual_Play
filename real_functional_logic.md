@@ -31,11 +31,19 @@ WEBCAM
   └─ VERTICAL DIRECTIONAL FLOW
          ├─ UPWARD FLOW           36,864 neurons
          └─ DOWNWARD FLOW         36,864 neurons
+
+POSITIVE VARIATION (graded external current)
+  ↓
+SPIKING FIELD A                   36,864 neurons
+  ↓ timestamped spikes
+ONE-TO-ONE SYNAPSE PROJECTION     signed weight + 8 ms delay
+  ↓ ring-buffered arrival
+SPIKING FIELD B                   36,864 neurons
 ```
 
-The live system therefore has 36,864 sensory locations and 258,048 graded branch neurons.
+The live system therefore has 36,864 sensory locations, 258,048 graded retinal branch neurons, and 73,728 discrete spiking neurons.
 
-None of these branches are discrete spikes.
+The retinal branches remain graded. Discrete firing begins only in the positive-variation cascade downstream of the retina.
 
 ---
 
@@ -198,7 +206,81 @@ This is the vertical counterpart of the same minimal opponent temporal-correlati
 
 ---
 
-# 6. LIVE OWNERSHIP
+# 6. REUSABLE SPIKING NEURAL CASCADE
+
+The positive-variation field remains a graded retinal output. It is also the first live external current source for a general spiking substrate:
+
+```text
+positive variation
+  ↓ held external current
+SpikingNeuronField A
+  ↓ threshold-crossing SpikeEventBatch
+SynapseProjection
+  ↓ signed weight after explicit delay
+ring-buffer arrival
+  ↓
+SpikingNeuronField B
+```
+
+`SpikingNeuronField` stores one contiguous value per stable neuron ID:
+
+```text
+V[i]                         membrane potential
+A[i]                         adaptation state
+H[i]                         sustaining-current state
+last_spike_ms[i]             most recent spike time
+refractory_until_ms[i]       earliest next eligible spike time
+```
+
+The live membrane step is:
+
+```text
+V += dt / membrane_tau * (
+      -V
+      + input_gain * external_drive
+      + H
+      - A
+)
+
+V += arriving_synaptic_input
+```
+
+An eligible neuron whose membrane reaches threshold emits a real event containing its stable neuron ID and neural-clock timestamp. It then records that timestamp, sets its refractory deadline, and resets its membrane potential. During the refractory interval its membrane remains at reset and it cannot emit another spike.
+
+`A` and `H` are real per-neuron state arrays, but both are initialized to zero and have no active evolution rule in this experiment. Adaptation and sustained-activity behavior are therefore represented but not implemented.
+
+`SynapseProjection` remains the only connectivity authority. Every sparse connection owns:
+
+```text
+source neuron ID
+target neuron ID
+signed weight
+delay in milliseconds
+```
+
+Its pre-existing graded `propagate()` behavior remains available and ignores delay, because it computes an instantaneous weighted projection. `NeuronSignalCascade` uses the same projection's delays for discrete spikes.
+
+The cascade holds the last external drive and advances membrane, refractory, spike, and arrival state with a 1 ms internal neural timestep between camera timestamps. Delays are rounded upward to neural ticks, so an arrival is never delivered earlier than its configured delay. A vectorized circular buffer accumulates target input by delivery slot; there is no Python event object or heap entry per synapse event.
+
+Current live positive-variation experiment:
+
+```text
+neural timestep           = 1 ms
+membrane time constant    = 10 ms
+threshold                 = 1.0
+reset potential           = 0.0
+refractory interval       = 5 ms
+external input gain       = 4.0
+projection                = one-to-one
+synaptic weight           = +0.7
+synaptic delay            = 8 ms
+```
+
+This is a real feed-forward temporal cascade and a reusable neural-substrate layer. It is not yet recurrent, plastic, adaptive, or a complete artificial nervous system.
+
+---
+
+# 7. LIVE OWNERSHIP
 
 `RetinalSignalPathway` sequences the live branches.
 
@@ -211,6 +293,7 @@ positive-variation field
 negative-variation field
 local-contrast field
 cardinal directional-flow owner
+positive-variation neuron cascade owner
 ```
 
 `CardinalDirectionalFlowField` sequences the directional comparisons and owns:
@@ -241,16 +324,31 @@ vertical adjacent-pair opponent calculation
 
 The axis owners receive delayed activity from the cardinal owner; neither stores a private temporal-history copy. The UI only observes the resulting arrays.
 
+`NeuronSignalCascade` owns:
+
+```text
+upstream SpikingNeuronField
+downstream SpikingNeuronField
+SynapseProjection
+held external drive
+internal neural clock
+delayed-arrival circular buffer
+```
+
+The UI does not sequence, calculate, or display the spiking cascade in a new panel during this stage.
+
 ---
 
-# 7. NOT YET LIVE
+# 8. NOT YET LIVE
 
 ```text
 diagonal directions
-discrete firing
-per-fire timestamps
-refractory behavior
 orientation-specific fields
+adaptation-state evolution
+sustaining-current evolution
+recurrent spiking connections
+variable firing thresholds
+synaptic plasticity / STDP
 long-term plasticity
 homeostatic regulation
 structural growth / pruning
@@ -258,7 +356,7 @@ structural growth / pruning
 
 ---
 
-# 8. CURRENT TEST GATE
+# 9. CURRENT TEST GATE
 
 The live path must prove:
 
@@ -308,4 +406,30 @@ correct horizontal or vertical direction field
 malformed input or backward time
    ↓
 fail without corrupting prior state
+
+repeated subthreshold current
+   ↓
+membrane accumulation without premature firing
+   ↓
+threshold crossing produces neuron ID + timestamp
+
+spike followed by strong refractory input
+   ↓
+no immediate refiring
+
+configured signed and delayed synapses
+   ↓
+only connected targets change
+   ↓
+no arrival before delay
+   ↓
+excitatory and inhibitory membrane effects at the correct neural time
+
+synthetic brightness increase
+   ↓
+graded positive variation
+   ↓
+upstream membrane accumulation and spike
+   ↓ 8 ms
+downstream membrane change
 ```

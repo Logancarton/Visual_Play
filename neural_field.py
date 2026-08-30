@@ -1,4 +1,4 @@
-"""Spatial neuron substrate and live early-retinal signal branches."""
+"""Spatial graded fields, spiking substrate, and live retinal signal paths."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ class SpatialNeuronField:
 
 
 class SynapseProjection:
-    """Explicit sparse directed synapses between two neuron populations."""
+    """Explicit sparse directed synapses with signed weights and delays."""
 
     def __init__(
         self,
@@ -102,6 +102,7 @@ class SynapseProjection:
         source_indices: np.ndarray | Iterable[int],
         target_indices: np.ndarray | Iterable[int],
         weights: np.ndarray | Iterable[float],
+        delays_ms: np.ndarray | Iterable[float] | None = None,
     ) -> None:
         if source_count < 1 or target_count < 1:
             raise ValueError("source_count and target_count must be >= 1")
@@ -109,14 +110,23 @@ class SynapseProjection:
         source = np.asarray(source_indices, dtype=np.int32).ravel()
         target = np.asarray(target_indices, dtype=np.int32).ravel()
         weight = np.asarray(weights, dtype=np.float32).ravel()
-        if not (source.size == target.size == weight.size):
-            raise ValueError("source_indices, target_indices, and weights must match")
+        delay = (
+            np.zeros(weight.size, dtype=np.float32)
+            if delays_ms is None
+            else np.asarray(delays_ms, dtype=np.float32).ravel()
+        )
+        if not (source.size == target.size == weight.size == delay.size):
+            raise ValueError(
+                "source_indices, target_indices, weights, and delays_ms must match"
+            )
         if source.size and (source.min() < 0 or source.max() >= source_count):
             raise ValueError("source index out of range")
         if target.size and (target.min() < 0 or target.max() >= target_count):
             raise ValueError("target index out of range")
         if not np.all(np.isfinite(weight)):
             raise ValueError("weights must contain only finite values")
+        if not np.all(np.isfinite(delay)) or np.any(delay < 0.0):
+            raise ValueError("delays_ms must contain finite values >= 0")
         if source.size:
             pairs = np.stack((source, target), axis=1)
             if np.unique(pairs, axis=0).shape[0] != pairs.shape[0]:
@@ -127,6 +137,7 @@ class SynapseProjection:
         self.source_indices = source
         self.target_indices = target
         self.weights = weight
+        self.delays_ms = delay
 
     @property
     def synapse_count(self) -> int:
@@ -139,12 +150,14 @@ class SynapseProjection:
         target_count: int,
         *,
         weight: float = 1.0,
+        delay_ms: float = 0.0,
     ) -> "SynapseProjection":
         if source_count != target_count:
             raise ValueError("one-to-one projection requires equal population sizes")
         indices = np.arange(source_count, dtype=np.int32)
         weights = np.full(source_count, float(weight), dtype=np.float32)
-        return cls(source_count, target_count, indices, indices, weights)
+        delays = np.full(source_count, float(delay_ms), dtype=np.float32)
+        return cls(source_count, target_count, indices, indices, weights, delays)
 
     def propagate(self, source_activity: np.ndarray | Iterable[float]) -> np.ndarray:
         activity = np.asarray(source_activity, dtype=np.float32).ravel()
@@ -174,6 +187,378 @@ class SynapseProjection:
             raise ValueError("target_neuron_id out of range")
         mask = self.target_indices == int(target_neuron_id)
         return self.source_indices[mask].copy(), self.weights[mask].copy()
+
+
+@dataclass(frozen=True)
+class SpikeEventBatch:
+    neuron_ids: np.ndarray
+    timestamps_ms: np.ndarray
+
+    @property
+    def count(self) -> int:
+        return int(self.neuron_ids.size)
+
+    @classmethod
+    def empty(cls) -> "SpikeEventBatch":
+        return cls(
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
+class SpikingFieldSnapshot:
+    potential: np.ndarray
+    adaptation: np.ndarray
+    sustaining_current: np.ndarray
+    last_spike_ms: np.ndarray
+    refractory_until_ms: np.ndarray
+    timestamp_ms: float
+
+
+class SpikingNeuronField:
+    """Vectorized leaky integrate-and-fire neurons with explicit time state."""
+
+    def __init__(
+        self,
+        rows: int,
+        cols: int,
+        *,
+        membrane_tau_ms: float = 10.0,
+        threshold: float = 1.0,
+        reset_potential: float = 0.0,
+        refractory_ms: float = 5.0,
+        input_gain: float = 1.0,
+        min_potential: float = -5.0,
+        max_potential: float = 5.0,
+    ) -> None:
+        if rows < 1 or cols < 1:
+            raise ValueError("rows and cols must be >= 1")
+        values = (
+            membrane_tau_ms,
+            threshold,
+            reset_potential,
+            refractory_ms,
+            input_gain,
+            min_potential,
+            max_potential,
+        )
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("spiking field parameters must be finite")
+        if membrane_tau_ms <= 0.0 or refractory_ms < 0.0 or input_gain <= 0.0:
+            raise ValueError(
+                "membrane_tau_ms and input_gain must be > 0; refractory_ms must be >= 0"
+            )
+        if not min_potential <= reset_potential < threshold <= max_potential:
+            raise ValueError(
+                "potentials must satisfy min <= reset < threshold <= max"
+            )
+
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.neuron_count = self.rows * self.cols
+        self.membrane_tau_ms = float(membrane_tau_ms)
+        self.threshold = float(threshold)
+        self.reset_potential = float(reset_potential)
+        self.refractory_ms = float(refractory_ms)
+        self.input_gain = float(input_gain)
+        self.min_potential = float(min_potential)
+        self.max_potential = float(max_potential)
+
+        self.neuron_ids = np.arange(self.neuron_count, dtype=np.int32)
+        yy, xx = np.mgrid[0:self.rows, 0:self.cols]
+        x = xx.astype(np.float32) / max(self.cols - 1, 1)
+        y = yy.astype(np.float32) / max(self.rows - 1, 1)
+        self.positions = np.stack((x.ravel(), y.ravel()), axis=1)
+
+        self.potential = np.full(
+            self.neuron_count, self.reset_potential, dtype=np.float32
+        )
+        self.adaptation = np.zeros(self.neuron_count, dtype=np.float32)
+        self.sustaining_current = np.zeros(self.neuron_count, dtype=np.float32)
+        self.last_spike_ms = np.full(self.neuron_count, -np.inf, dtype=np.float64)
+        self.refractory_until_ms = np.full(
+            self.neuron_count, -np.inf, dtype=np.float64
+        )
+        self._last_timestamp_ms: float | None = None
+
+    def _coerce_drive(
+        self,
+        drive: np.ndarray | Iterable[float],
+        name: str,
+    ) -> np.ndarray:
+        array = np.asarray(drive, dtype=np.float32)
+        if array.shape == (self.rows, self.cols):
+            flat = array.ravel()
+        elif array.shape == (self.neuron_count,):
+            flat = array
+        else:
+            raise ValueError(
+                f"{name} must have shape {(self.rows, self.cols)} or "
+                f"({self.neuron_count},), got {array.shape}"
+            )
+        if not np.all(np.isfinite(flat)):
+            raise ValueError(f"{name} must contain only finite values")
+        return flat
+
+    def step(
+        self,
+        external_drive: np.ndarray | Iterable[float],
+        synaptic_input: np.ndarray | Iterable[float] | None = None,
+        *,
+        timestamp_ms: float,
+        dt_ms: float,
+    ) -> SpikeEventBatch:
+        external = self._coerce_drive(external_drive, "external_drive")
+        synaptic = (
+            np.zeros(self.neuron_count, dtype=np.float32)
+            if synaptic_input is None
+            else self._coerce_drive(synaptic_input, "synaptic_input")
+        )
+        now_ms = float(timestamp_ms)
+        elapsed_ms = float(dt_ms)
+        if not math.isfinite(now_ms) or not math.isfinite(elapsed_ms):
+            raise ValueError("timestamp_ms and dt_ms must be finite")
+        if elapsed_ms <= 0.0:
+            raise ValueError("dt_ms must be > 0")
+        if self._last_timestamp_ms is not None and now_ms <= self._last_timestamp_ms:
+            raise ValueError("timestamp_ms must move forward")
+
+        potential = self.potential + (elapsed_ms / self.membrane_tau_ms) * (
+            -self.potential
+            + self.input_gain * external
+            + self.sustaining_current
+            - self.adaptation
+        )
+        potential = potential + synaptic
+        potential = np.clip(
+            potential, self.min_potential, self.max_potential
+        ).astype(np.float32)
+
+        refractory = now_ms < self.refractory_until_ms
+        potential[refractory] = self.reset_potential
+        spike_mask = (~refractory) & (potential >= self.threshold)
+        spike_ids = self.neuron_ids[spike_mask].copy()
+
+        last_spike_ms = self.last_spike_ms.copy()
+        refractory_until_ms = self.refractory_until_ms.copy()
+        if spike_ids.size:
+            last_spike_ms[spike_mask] = now_ms
+            refractory_until_ms[spike_mask] = now_ms + self.refractory_ms
+            potential[spike_mask] = self.reset_potential
+
+        self.potential = potential
+        self.last_spike_ms = last_spike_ms
+        self.refractory_until_ms = refractory_until_ms
+        self._last_timestamp_ms = now_ms
+
+        return SpikeEventBatch(
+            spike_ids,
+            np.full(spike_ids.size, now_ms, dtype=np.float64),
+        )
+
+    def snapshot(self, timestamp_ms: float | None = None) -> SpikingFieldSnapshot:
+        now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+        return SpikingFieldSnapshot(
+            self.potential.copy(),
+            self.adaptation.copy(),
+            self.sustaining_current.copy(),
+            self.last_spike_ms.copy(),
+            self.refractory_until_ms.copy(),
+            0.0 if now_ms is None else float(now_ms),
+        )
+
+    def reset(self) -> None:
+        self.potential.fill(self.reset_potential)
+        self.adaptation.fill(0.0)
+        self.sustaining_current.fill(0.0)
+        self.last_spike_ms.fill(-np.inf)
+        self.refractory_until_ms.fill(-np.inf)
+        self._last_timestamp_ms = None
+
+
+@dataclass(frozen=True)
+class NeuronCascadeSnapshot:
+    upstream: SpikingFieldSnapshot
+    downstream: SpikingFieldSnapshot
+    upstream_spikes: SpikeEventBatch
+    downstream_spikes: SpikeEventBatch
+    neural_time_ms: float
+    timestamp_ms: float
+
+
+class NeuronSignalCascade:
+    """Reusable two-field spiking cascade with a fixed-step delay ring."""
+
+    def __init__(
+        self,
+        upstream: SpikingNeuronField,
+        downstream: SpikingNeuronField,
+        projection: SynapseProjection,
+        *,
+        timestep_ms: float = 1.0,
+    ) -> None:
+        if projection.source_count != upstream.neuron_count:
+            raise ValueError("projection source_count must match upstream field")
+        if projection.target_count != downstream.neuron_count:
+            raise ValueError("projection target_count must match downstream field")
+        if not math.isfinite(float(timestep_ms)) or timestep_ms <= 0.0:
+            raise ValueError("timestep_ms must be finite and > 0")
+
+        self.upstream = upstream
+        self.downstream = downstream
+        self.projection = projection
+        self.timestep_ms = float(timestep_ms)
+        self.delay_steps = np.ceil(
+            projection.delays_ms.astype(np.float64) / self.timestep_ms
+        ).astype(np.int64)
+        max_delay_steps = int(self.delay_steps.max()) if self.delay_steps.size else 0
+        self.delay_buffer = np.zeros(
+            (max_delay_steps + 1, downstream.neuron_count), dtype=np.float32
+        )
+        self._delay_cursor = 0
+        self._held_external_drive = np.zeros(
+            upstream.neuron_count, dtype=np.float32
+        )
+        self._zero_upstream_synaptic = np.zeros(
+            upstream.neuron_count, dtype=np.float32
+        )
+        self._zero_downstream_external = np.zeros(
+            downstream.neuron_count, dtype=np.float32
+        )
+        self._neural_time_ms: float | None = None
+        self._last_timestamp_ms: float | None = None
+
+    @property
+    def neuron_count(self) -> int:
+        return self.upstream.neuron_count + self.downstream.neuron_count
+
+    def _coerce_external(self, values: np.ndarray) -> np.ndarray:
+        return self.upstream._coerce_drive(values, "external_drive").copy()
+
+    @staticmethod
+    def _combine_event_batches(
+        neuron_ids: list[np.ndarray],
+        timestamps_ms: list[np.ndarray],
+    ) -> SpikeEventBatch:
+        if not neuron_ids:
+            return SpikeEventBatch.empty()
+        return SpikeEventBatch(
+            np.concatenate(neuron_ids).astype(np.int32, copy=False),
+            np.concatenate(timestamps_ms).astype(np.float64, copy=False),
+        )
+
+    def _snapshot_with_events(
+        self,
+        upstream_spikes: SpikeEventBatch,
+        downstream_spikes: SpikeEventBatch,
+        timestamp_ms: float,
+    ) -> NeuronCascadeSnapshot:
+        neural_time_ms = (
+            float(timestamp_ms)
+            if self._neural_time_ms is None
+            else self._neural_time_ms
+        )
+        return NeuronCascadeSnapshot(
+            self.upstream.snapshot(neural_time_ms),
+            self.downstream.snapshot(neural_time_ms),
+            upstream_spikes,
+            downstream_spikes,
+            neural_time_ms,
+            float(timestamp_ms),
+        )
+
+    def process(
+        self,
+        external_drive: np.ndarray,
+        *,
+        timestamp_ms: float,
+    ) -> NeuronCascadeSnapshot:
+        current_drive = self._coerce_external(external_drive)
+        now_ms = float(timestamp_ms)
+        if not math.isfinite(now_ms):
+            raise ValueError("timestamp_ms must be finite")
+        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
+            raise ValueError("timestamp_ms cannot move backward")
+
+        if self._neural_time_ms is None:
+            self._neural_time_ms = now_ms
+            self._last_timestamp_ms = now_ms
+            self._held_external_drive = current_drive
+            return self._snapshot_with_events(
+                SpikeEventBatch.empty(), SpikeEventBatch.empty(), now_ms
+            )
+
+        upstream_ids: list[np.ndarray] = []
+        upstream_times: list[np.ndarray] = []
+        downstream_ids: list[np.ndarray] = []
+        downstream_times: list[np.ndarray] = []
+
+        while self._neural_time_ms + self.timestep_ms <= now_ms + 1e-9:
+            tick_ms = self._neural_time_ms + self.timestep_ms
+            upstream_spikes = self.upstream.step(
+                self._held_external_drive,
+                self._zero_upstream_synaptic,
+                timestamp_ms=tick_ms,
+                dt_ms=self.timestep_ms,
+            )
+            if upstream_spikes.count:
+                upstream_ids.append(upstream_spikes.neuron_ids)
+                upstream_times.append(upstream_spikes.timestamps_ms)
+                spike_mask = np.zeros(
+                    self.projection.source_count, dtype=np.bool_
+                )
+                spike_mask[upstream_spikes.neuron_ids] = True
+                active_synapses = spike_mask[self.projection.source_indices]
+                if np.any(active_synapses):
+                    slots = (
+                        self._delay_cursor + self.delay_steps[active_synapses]
+                    ) % self.delay_buffer.shape[0]
+                    np.add.at(
+                        self.delay_buffer,
+                        (slots, self.projection.target_indices[active_synapses]),
+                        self.projection.weights[active_synapses],
+                    )
+
+            arriving = self.delay_buffer[self._delay_cursor].copy()
+            self.delay_buffer[self._delay_cursor].fill(0.0)
+            downstream_spikes = self.downstream.step(
+                self._zero_downstream_external,
+                arriving,
+                timestamp_ms=tick_ms,
+                dt_ms=self.timestep_ms,
+            )
+            if downstream_spikes.count:
+                downstream_ids.append(downstream_spikes.neuron_ids)
+                downstream_times.append(downstream_spikes.timestamps_ms)
+
+            self._delay_cursor = (self._delay_cursor + 1) % self.delay_buffer.shape[0]
+            self._neural_time_ms = tick_ms
+
+        self._held_external_drive = current_drive
+        self._last_timestamp_ms = now_ms
+        return self._snapshot_with_events(
+            self._combine_event_batches(upstream_ids, upstream_times),
+            self._combine_event_batches(downstream_ids, downstream_times),
+            now_ms,
+        )
+
+    def snapshot(self, timestamp_ms: float | None = None) -> NeuronCascadeSnapshot:
+        now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+        return self._snapshot_with_events(
+            SpikeEventBatch.empty(),
+            SpikeEventBatch.empty(),
+            0.0 if now_ms is None else float(now_ms),
+        )
+
+    def reset(self) -> None:
+        self.upstream.reset()
+        self.downstream.reset()
+        self.delay_buffer.fill(0.0)
+        self._delay_cursor = 0
+        self._held_external_drive.fill(0.0)
+        self._neural_time_ms = None
+        self._last_timestamp_ms = None
 
 
 @dataclass(frozen=True)
@@ -492,11 +877,12 @@ class RetinalSignalSnapshot:
     leftward_activity: np.ndarray
     downward_activity: np.ndarray
     upward_activity: np.ndarray
+    positive_spike_cascade: NeuronCascadeSnapshot
     timestamp_ms: float
 
 
 class RetinalSignalPathway:
-    """Live brightness -> variation, contrast, and paired directional flow."""
+    """Live graded retinal branches plus a positive-variation spike cascade."""
 
     def __init__(
         self,
@@ -508,6 +894,9 @@ class RetinalSignalPathway:
         contrast_gain: float = 4.0,
         flow_trace_tau_ms: float = 100.0,
         flow_gain: float = 4.0,
+        spike_timestep_ms: float = 1.0,
+        spike_synaptic_weight: float = 0.7,
+        spike_synaptic_delay_ms: float = 8.0,
     ) -> None:
         if rows < 1 or cols < 2:
             raise ValueError("rows must be >= 1 and cols must be >= 2")
@@ -537,6 +926,27 @@ class RetinalSignalPathway:
             trace_tau_ms=flow_trace_tau_ms,
             flow_gain=flow_gain,
         )
+        spiking_kwargs = dict(
+            membrane_tau_ms=10.0,
+            threshold=1.0,
+            reset_potential=0.0,
+            refractory_ms=5.0,
+            input_gain=4.0,
+        )
+        spike_upstream = SpikingNeuronField(rows, cols, **spiking_kwargs)
+        spike_downstream = SpikingNeuronField(rows, cols, **spiking_kwargs)
+        spike_projection = SynapseProjection.one_to_one(
+            self.sensory_location_count,
+            self.sensory_location_count,
+            weight=spike_synaptic_weight,
+            delay_ms=spike_synaptic_delay_ms,
+        )
+        self.positive_variation_cascade = NeuronSignalCascade(
+            spike_upstream,
+            spike_downstream,
+            spike_projection,
+            timestep_ms=spike_timestep_ms,
+        )
         self.baseline = np.zeros((rows, cols), dtype=np.float32)
         self._initialized = False
         self._last_timestamp_ms: float | None = None
@@ -549,6 +959,10 @@ class RetinalSignalPathway:
             + self.contrast_field.neuron_count
             + self.directional_flow.neuron_count
         )
+
+    @property
+    def spiking_neuron_count(self) -> int:
+        return self.positive_variation_cascade.neuron_count
 
     def _coerce_luminance(self, brightness: np.ndarray) -> np.ndarray:
         current = np.asarray(brightness, dtype=np.float32)
@@ -604,6 +1018,10 @@ class RetinalSignalPathway:
                 self.off_field.activity_map(),
                 timestamp_ms=now_ms,
             )
+            spike_cascade = self.positive_variation_cascade.process(
+                self.on_field.activity_map(),
+                timestamp_ms=now_ms,
+            )
             return RetinalSignalSnapshot(
                 self.baseline.copy(),
                 self.on_field.activity_map().copy(),
@@ -613,6 +1031,7 @@ class RetinalSignalPathway:
                 flow.leftward_activity,
                 flow.downward_activity,
                 flow.upward_activity,
+                spike_cascade,
                 now_ms,
             )
 
@@ -623,6 +1042,10 @@ class RetinalSignalPathway:
         off_map = off.activity.reshape(self.rows, self.cols)
         flow = self.directional_flow.process(
             on_map, off_map, timestamp_ms=now_ms
+        )
+        spike_cascade = self.positive_variation_cascade.process(
+            on_map,
+            timestamp_ms=now_ms,
         )
 
         dt_ms = now_ms - self._last_timestamp_ms
@@ -643,12 +1066,14 @@ class RetinalSignalPathway:
             flow.leftward_activity,
             flow.downward_activity,
             flow.upward_activity,
+            spike_cascade,
             now_ms,
         )
 
     def snapshot(self, timestamp_ms: float | None = None) -> RetinalSignalSnapshot:
         now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
         flow = self.directional_flow.snapshot(now_ms)
+        spike_cascade = self.positive_variation_cascade.snapshot(now_ms)
         return RetinalSignalSnapshot(
             self.baseline.copy(),
             self.on_field.activity_map().copy(),
@@ -658,6 +1083,7 @@ class RetinalSignalPathway:
             flow.leftward_activity,
             flow.downward_activity,
             flow.upward_activity,
+            spike_cascade,
             0.0 if now_ms is None else float(now_ms),
         )
 
@@ -667,5 +1093,6 @@ class RetinalSignalPathway:
         self.off_field.reset()
         self.contrast_field.reset()
         self.directional_flow.reset()
+        self.positive_variation_cascade.reset()
         self._initialized = False
         self._last_timestamp_ms = None
