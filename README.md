@@ -14,7 +14,7 @@ The first two panels remain the physical webcam image and measured luminance. Th
 - top-to-bottom directional flow from opponent timing across adjacent locations
 - bottom-to-top directional flow from the exact mirrored opponent timing
 
-Each directional axis has one owner with a shared positive trace, shared negative trace, and one signed opponent calculation per adjacent pair. Left-to-right evidence drives the rightward field while the opposite sign drives the leftward field. Top-to-bottom evidence drives the downward field while the opposite sign drives the upward field. Both bright and dark moving changes can drive direction. This is not OpenCV optical flow and not an object tracker.
+One cardinal directional-flow owner maintains a single shared positive trace and negative trace. The horizontal and vertical axis owners consume that same delayed history and each perform one signed opponent calculation per adjacent pair. Left-to-right evidence drives the rightward field while the opposite sign drives the leftward field. Top-to-bottom evidence drives the downward field while the opposite sign drives the upward field. Both bright and dark moving changes can drive direction. This is not OpenCV optical flow and not an object tracker.
 
 All live outputs are graded. No spike model or long-term plasticity is live yet.
 

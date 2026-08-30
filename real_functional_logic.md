@@ -139,7 +139,7 @@ A simultaneous change at both locations tends to cancel rather than being mislab
 
 Both bright and dark moving changes can drive either direction because positive and negative variation are correlated separately before being combined.
 
-The delayed state is one shared low-pass temporal trace:
+Horizontal and vertical comparisons consume the same shared low-pass temporal trace. The cardinal flow owner advances that trace once, after every axis has compared the delayed state with current activity:
 
 ```text
 trace(t+1) = trace(t) + alpha * (current_activity - trace(t))
@@ -183,7 +183,7 @@ upward[T]   = clip(-pair_signal, 0, 1)
 
 The sign convention is therefore explicit: positive signed evidence means top-to-bottom motion and drives the downward field; negative signed evidence means bottom-to-top motion and drives the upward field.
 
-The two vertical directions share one positive temporal trace and one negative temporal trace. Simultaneous change at both members of a pair cancels in the opponent subtraction. Bright and dark moving changes are correlated separately, so either polarity can drive either direction.
+The vertical comparison consumes the same positive temporal trace and negative temporal trace as the horizontal comparison. Simultaneous change at both members of a pair cancels in the opponent subtraction. Bright and dark moving changes are correlated separately, so either polarity can drive either direction.
 
 Vertical flow uses the same trace update and constants as horizontal flow:
 
@@ -210,6 +210,15 @@ last update timestamp
 positive-variation field
 negative-variation field
 local-contrast field
+cardinal directional-flow owner
+```
+
+`CardinalDirectionalFlowField` sequences the directional comparisons and owns:
+
+```text
+one shared positive temporal trace
+one shared negative temporal trace
+flow trace timing and once-per-frame trace advancement
 horizontal directional-flow owner
 vertical directional-flow owner
 ```
@@ -217,24 +226,20 @@ vertical directional-flow owner
 `HorizontalDirectionalFlowField` owns:
 
 ```text
-shared positive temporal trace
-shared negative temporal trace
 leftward output field
 rightward output field
-flow trace timing
+horizontal adjacent-pair opponent calculation
 ```
 
 `VerticalDirectionalFlowField` owns:
 
 ```text
-shared positive temporal trace
-shared negative temporal trace
 upward output field
 downward output field
-flow trace timing
+vertical adjacent-pair opponent calculation
 ```
 
-The UI only observes these arrays.
+The axis owners receive delayed activity from the cardinal owner; neither stores a private temporal-history copy. The UI only observes the resulting arrays.
 
 ---
 
@@ -289,6 +294,10 @@ both vertical directions cancel
 dark vertical motion
    ↓
 correct vertical direction response
+
+horizontal and vertical comparison owners
+   ↓
+consume one shared positive/negative temporal trace
 
 live brightness sequence
    ↓

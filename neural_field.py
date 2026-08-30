@@ -180,37 +180,29 @@ class SynapseProjection:
 class HorizontalFlowSnapshot:
     rightward_activity: np.ndarray
     leftward_activity: np.ndarray
-    on_trace: np.ndarray
-    off_trace: np.ndarray
-    timestamp_ms: float
 
 
 class HorizontalDirectionalFlowField:
-    """Paired left/right opponent detector sharing one temporal trace state."""
+    """Paired left/right opponent comparison over a supplied delayed trace."""
 
     def __init__(
         self,
         rows: int,
         cols: int,
         *,
-        trace_tau_ms: float = 100.0,
         flow_gain: float = 4.0,
     ) -> None:
         if rows < 1 or cols < 2:
             raise ValueError("rows must be >= 1 and cols must be >= 2")
-        if trace_tau_ms <= 0.0 or flow_gain <= 0.0:
-            raise ValueError("trace_tau_ms and flow_gain must be > 0")
+        if flow_gain <= 0.0:
+            raise ValueError("flow_gain must be > 0")
 
         self.rows = int(rows)
         self.cols = int(cols)
-        self.trace_tau_ms = float(trace_tau_ms)
         self.flow_gain = float(flow_gain)
         kwargs = dict(threshold=0.0, leak=1.0, max_potential=1.0)
         self.rightward_field = SpatialNeuronField(rows, cols, **kwargs)
         self.leftward_field = SpatialNeuronField(rows, cols, **kwargs)
-        self.on_trace = np.zeros((rows, cols), dtype=np.float32)
-        self.off_trace = np.zeros((rows, cols), dtype=np.float32)
-        self._last_timestamp_ms: float | None = None
 
     @property
     def neuron_count(self) -> int:
@@ -231,32 +223,21 @@ class HorizontalDirectionalFlowField:
         on_activity: np.ndarray,
         off_activity: np.ndarray,
         *,
-        timestamp_ms: float,
+        on_trace: np.ndarray,
+        off_trace: np.ndarray,
     ) -> HorizontalFlowSnapshot:
         on = self._coerce(on_activity, "on_activity")
         off = self._coerce(off_activity, "off_activity")
-        now_ms = float(timestamp_ms)
-        if not math.isfinite(now_ms):
-            raise ValueError("timestamp_ms must be finite")
-        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
-            raise ValueError("timestamp_ms cannot move backward")
-
-        if self._last_timestamp_ms is None:
-            zeros = np.zeros((self.rows, self.cols), dtype=np.float32)
-            self.rightward_field.step(zeros)
-            self.leftward_field.step(zeros)
-            self.on_trace = on.copy()
-            self.off_trace = off.copy()
-            self._last_timestamp_ms = now_ms
-            return self.snapshot(now_ms)
+        delayed_on = self._coerce(on_trace, "on_trace")
+        delayed_off = self._coerce(off_trace, "off_trace")
 
         right_evidence = (
-            self.on_trace[:, :-1] * on[:, 1:]
-            + self.off_trace[:, :-1] * off[:, 1:]
+            delayed_on[:, :-1] * on[:, 1:]
+            + delayed_off[:, :-1] * off[:, 1:]
         )
         left_evidence = (
-            self.on_trace[:, 1:] * on[:, :-1]
-            + self.off_trace[:, 1:] * off[:, :-1]
+            delayed_on[:, 1:] * on[:, :-1]
+            + delayed_off[:, 1:] * off[:, :-1]
         )
         opponent_pair = (right_evidence - left_evidence) * self.flow_gain
 
@@ -268,73 +249,49 @@ class HorizontalDirectionalFlowField:
         right = self.rightward_field.step(right_drive)
         left = self.leftward_field.step(left_drive)
 
-        dt_ms = now_ms - self._last_timestamp_ms
-        alpha = 1.0 - math.exp(-dt_ms / self.trace_tau_ms) if dt_ms > 0.0 else 0.0
-        self.on_trace += alpha * (on - self.on_trace)
-        self.off_trace += alpha * (off - self.off_trace)
-        self._last_timestamp_ms = now_ms
-
         return HorizontalFlowSnapshot(
             right.activity.reshape(self.rows, self.cols),
             left.activity.reshape(self.rows, self.cols),
-            self.on_trace.copy(),
-            self.off_trace.copy(),
-            now_ms,
         )
 
-    def snapshot(self, timestamp_ms: float | None = None) -> HorizontalFlowSnapshot:
-        now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+    def snapshot(self) -> HorizontalFlowSnapshot:
         return HorizontalFlowSnapshot(
             self.rightward_field.activity_map().copy(),
             self.leftward_field.activity_map().copy(),
-            self.on_trace.copy(),
-            self.off_trace.copy(),
-            0.0 if now_ms is None else float(now_ms),
         )
 
     def reset(self) -> None:
         self.rightward_field.reset()
         self.leftward_field.reset()
-        self.on_trace.fill(0.0)
-        self.off_trace.fill(0.0)
-        self._last_timestamp_ms = None
 
 
 @dataclass(frozen=True)
 class VerticalFlowSnapshot:
     downward_activity: np.ndarray
     upward_activity: np.ndarray
-    on_trace: np.ndarray
-    off_trace: np.ndarray
-    timestamp_ms: float
 
 
 class VerticalDirectionalFlowField:
-    """Paired up/down opponent detector sharing one temporal trace state."""
+    """Paired up/down opponent comparison over a supplied delayed trace."""
 
     def __init__(
         self,
         rows: int,
         cols: int,
         *,
-        trace_tau_ms: float = 100.0,
         flow_gain: float = 4.0,
     ) -> None:
         if rows < 1 or cols < 1:
             raise ValueError("rows and cols must be >= 1")
-        if trace_tau_ms <= 0.0 or flow_gain <= 0.0:
-            raise ValueError("trace_tau_ms and flow_gain must be > 0")
+        if flow_gain <= 0.0:
+            raise ValueError("flow_gain must be > 0")
 
         self.rows = int(rows)
         self.cols = int(cols)
-        self.trace_tau_ms = float(trace_tau_ms)
         self.flow_gain = float(flow_gain)
         kwargs = dict(threshold=0.0, leak=1.0, max_potential=1.0)
         self.downward_field = SpatialNeuronField(rows, cols, **kwargs)
         self.upward_field = SpatialNeuronField(rows, cols, **kwargs)
-        self.on_trace = np.zeros((rows, cols), dtype=np.float32)
-        self.off_trace = np.zeros((rows, cols), dtype=np.float32)
-        self._last_timestamp_ms: float | None = None
 
     @property
     def neuron_count(self) -> int:
@@ -355,32 +312,21 @@ class VerticalDirectionalFlowField:
         on_activity: np.ndarray,
         off_activity: np.ndarray,
         *,
-        timestamp_ms: float,
+        on_trace: np.ndarray,
+        off_trace: np.ndarray,
     ) -> VerticalFlowSnapshot:
         on = self._coerce(on_activity, "on_activity")
         off = self._coerce(off_activity, "off_activity")
-        now_ms = float(timestamp_ms)
-        if not math.isfinite(now_ms):
-            raise ValueError("timestamp_ms must be finite")
-        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
-            raise ValueError("timestamp_ms cannot move backward")
-
-        if self._last_timestamp_ms is None:
-            zeros = np.zeros((self.rows, self.cols), dtype=np.float32)
-            self.downward_field.step(zeros)
-            self.upward_field.step(zeros)
-            self.on_trace = on.copy()
-            self.off_trace = off.copy()
-            self._last_timestamp_ms = now_ms
-            return self.snapshot(now_ms)
+        delayed_on = self._coerce(on_trace, "on_trace")
+        delayed_off = self._coerce(off_trace, "off_trace")
 
         down_evidence = (
-            self.on_trace[:-1, :] * on[1:, :]
-            + self.off_trace[:-1, :] * off[1:, :]
+            delayed_on[:-1, :] * on[1:, :]
+            + delayed_off[:-1, :] * off[1:, :]
         )
         up_evidence = (
-            self.on_trace[1:, :] * on[:-1, :]
-            + self.off_trace[1:, :] * off[:-1, :]
+            delayed_on[1:, :] * on[:-1, :]
+            + delayed_off[1:, :] * off[:-1, :]
         )
         opponent_pair = (down_evidence - up_evidence) * self.flow_gain
 
@@ -392,33 +338,145 @@ class VerticalDirectionalFlowField:
         down = self.downward_field.step(down_drive)
         up = self.upward_field.step(up_drive)
 
-        dt_ms = now_ms - self._last_timestamp_ms
-        alpha = 1.0 - math.exp(-dt_ms / self.trace_tau_ms) if dt_ms > 0.0 else 0.0
-        self.on_trace += alpha * (on - self.on_trace)
-        self.off_trace += alpha * (off - self.off_trace)
-        self._last_timestamp_ms = now_ms
-
         return VerticalFlowSnapshot(
             down.activity.reshape(self.rows, self.cols),
             up.activity.reshape(self.rows, self.cols),
+        )
+
+    def snapshot(self) -> VerticalFlowSnapshot:
+        return VerticalFlowSnapshot(
+            self.downward_field.activity_map().copy(),
+            self.upward_field.activity_map().copy(),
+        )
+
+    def reset(self) -> None:
+        self.downward_field.reset()
+        self.upward_field.reset()
+
+
+@dataclass(frozen=True)
+class CardinalFlowSnapshot:
+    rightward_activity: np.ndarray
+    leftward_activity: np.ndarray
+    downward_activity: np.ndarray
+    upward_activity: np.ndarray
+    on_trace: np.ndarray
+    off_trace: np.ndarray
+    timestamp_ms: float
+
+
+class CardinalDirectionalFlowField:
+    """Four cardinal comparisons sharing one positive/negative trace state."""
+
+    def __init__(
+        self,
+        rows: int,
+        cols: int,
+        *,
+        trace_tau_ms: float = 100.0,
+        flow_gain: float = 4.0,
+    ) -> None:
+        if rows < 1 or cols < 2:
+            raise ValueError("rows must be >= 1 and cols must be >= 2")
+        if trace_tau_ms <= 0.0 or flow_gain <= 0.0:
+            raise ValueError("trace_tau_ms and flow_gain must be > 0")
+
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.trace_tau_ms = float(trace_tau_ms)
+        self.horizontal_flow = HorizontalDirectionalFlowField(
+            rows, cols, flow_gain=flow_gain
+        )
+        self.vertical_flow = VerticalDirectionalFlowField(
+            rows, cols, flow_gain=flow_gain
+        )
+        self.on_trace = np.zeros((rows, cols), dtype=np.float32)
+        self.off_trace = np.zeros((rows, cols), dtype=np.float32)
+        self._last_timestamp_ms: float | None = None
+
+    @property
+    def neuron_count(self) -> int:
+        return self.horizontal_flow.neuron_count + self.vertical_flow.neuron_count
+
+    def _coerce(self, values: np.ndarray, name: str) -> np.ndarray:
+        activity = np.asarray(values, dtype=np.float32)
+        if activity.shape != (self.rows, self.cols):
+            raise ValueError(
+                f"{name} must have shape {(self.rows, self.cols)}, got {activity.shape}"
+            )
+        if not np.all(np.isfinite(activity)):
+            raise ValueError(f"{name} must contain only finite values")
+        return np.clip(activity, 0.0, 1.0)
+
+    def process(
+        self,
+        on_activity: np.ndarray,
+        off_activity: np.ndarray,
+        *,
+        timestamp_ms: float,
+    ) -> CardinalFlowSnapshot:
+        on = self._coerce(on_activity, "on_activity")
+        off = self._coerce(off_activity, "off_activity")
+        now_ms = float(timestamp_ms)
+        if not math.isfinite(now_ms):
+            raise ValueError("timestamp_ms must be finite")
+        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
+            raise ValueError("timestamp_ms cannot move backward")
+
+        horizontal = self.horizontal_flow.process(
+            on,
+            off,
+            on_trace=self.on_trace,
+            off_trace=self.off_trace,
+        )
+        vertical = self.vertical_flow.process(
+            on,
+            off,
+            on_trace=self.on_trace,
+            off_trace=self.off_trace,
+        )
+
+        if self._last_timestamp_ms is None:
+            self.on_trace = on.copy()
+            self.off_trace = off.copy()
+        else:
+            dt_ms = now_ms - self._last_timestamp_ms
+            alpha = (
+                1.0 - math.exp(-dt_ms / self.trace_tau_ms)
+                if dt_ms > 0.0
+                else 0.0
+            )
+            self.on_trace += alpha * (on - self.on_trace)
+            self.off_trace += alpha * (off - self.off_trace)
+        self._last_timestamp_ms = now_ms
+
+        return CardinalFlowSnapshot(
+            horizontal.rightward_activity,
+            horizontal.leftward_activity,
+            vertical.downward_activity,
+            vertical.upward_activity,
             self.on_trace.copy(),
             self.off_trace.copy(),
             now_ms,
         )
 
-    def snapshot(self, timestamp_ms: float | None = None) -> VerticalFlowSnapshot:
+    def snapshot(self, timestamp_ms: float | None = None) -> CardinalFlowSnapshot:
         now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
-        return VerticalFlowSnapshot(
-            self.downward_field.activity_map().copy(),
-            self.upward_field.activity_map().copy(),
+        horizontal = self.horizontal_flow.snapshot()
+        vertical = self.vertical_flow.snapshot()
+        return CardinalFlowSnapshot(
+            horizontal.rightward_activity,
+            horizontal.leftward_activity,
+            vertical.downward_activity,
+            vertical.upward_activity,
             self.on_trace.copy(),
             self.off_trace.copy(),
             0.0 if now_ms is None else float(now_ms),
         )
 
     def reset(self) -> None:
-        self.downward_field.reset()
-        self.upward_field.reset()
+        self.horizontal_flow.reset()
+        self.vertical_flow.reset()
         self.on_trace.fill(0.0)
         self.off_trace.fill(0.0)
         self._last_timestamp_ms = None
@@ -473,13 +531,7 @@ class RetinalSignalPathway:
         self.on_field = SpatialNeuronField(rows, cols, **kwargs)
         self.off_field = SpatialNeuronField(rows, cols, **kwargs)
         self.contrast_field = SpatialNeuronField(rows, cols, **kwargs)
-        self.horizontal_flow = HorizontalDirectionalFlowField(
-            rows,
-            cols,
-            trace_tau_ms=flow_trace_tau_ms,
-            flow_gain=flow_gain,
-        )
-        self.vertical_flow = VerticalDirectionalFlowField(
+        self.directional_flow = CardinalDirectionalFlowField(
             rows,
             cols,
             trace_tau_ms=flow_trace_tau_ms,
@@ -495,8 +547,7 @@ class RetinalSignalPathway:
             self.on_field.neuron_count
             + self.off_field.neuron_count
             + self.contrast_field.neuron_count
-            + self.horizontal_flow.neuron_count
-            + self.vertical_flow.neuron_count
+            + self.directional_flow.neuron_count
         )
 
     def _coerce_luminance(self, brightness: np.ndarray) -> np.ndarray:
@@ -548,12 +599,7 @@ class RetinalSignalPathway:
             self._last_timestamp_ms = now_ms
             self.on_field.reset()
             self.off_field.reset()
-            horizontal_flow = self.horizontal_flow.process(
-                self.on_field.activity_map(),
-                self.off_field.activity_map(),
-                timestamp_ms=now_ms,
-            )
-            vertical_flow = self.vertical_flow.process(
+            flow = self.directional_flow.process(
                 self.on_field.activity_map(),
                 self.off_field.activity_map(),
                 timestamp_ms=now_ms,
@@ -563,10 +609,10 @@ class RetinalSignalPathway:
                 self.on_field.activity_map().copy(),
                 self.off_field.activity_map().copy(),
                 contrast.activity.reshape(self.rows, self.cols),
-                horizontal_flow.rightward_activity,
-                horizontal_flow.leftward_activity,
-                vertical_flow.downward_activity,
-                vertical_flow.upward_activity,
+                flow.rightward_activity,
+                flow.leftward_activity,
+                flow.downward_activity,
+                flow.upward_activity,
                 now_ms,
             )
 
@@ -575,10 +621,7 @@ class RetinalSignalPathway:
         off = self.off_field.step(np.clip(-delta * self.response_gain, 0.0, 1.0))
         on_map = on.activity.reshape(self.rows, self.cols)
         off_map = off.activity.reshape(self.rows, self.cols)
-        horizontal_flow = self.horizontal_flow.process(
-            on_map, off_map, timestamp_ms=now_ms
-        )
-        vertical_flow = self.vertical_flow.process(
+        flow = self.directional_flow.process(
             on_map, off_map, timestamp_ms=now_ms
         )
 
@@ -596,24 +639,25 @@ class RetinalSignalPathway:
             on_map,
             off_map,
             contrast.activity.reshape(self.rows, self.cols),
-            horizontal_flow.rightward_activity,
-            horizontal_flow.leftward_activity,
-            vertical_flow.downward_activity,
-            vertical_flow.upward_activity,
+            flow.rightward_activity,
+            flow.leftward_activity,
+            flow.downward_activity,
+            flow.upward_activity,
             now_ms,
         )
 
     def snapshot(self, timestamp_ms: float | None = None) -> RetinalSignalSnapshot:
         now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+        flow = self.directional_flow.snapshot(now_ms)
         return RetinalSignalSnapshot(
             self.baseline.copy(),
             self.on_field.activity_map().copy(),
             self.off_field.activity_map().copy(),
             self.contrast_field.activity_map().copy(),
-            self.horizontal_flow.rightward_field.activity_map().copy(),
-            self.horizontal_flow.leftward_field.activity_map().copy(),
-            self.vertical_flow.downward_field.activity_map().copy(),
-            self.vertical_flow.upward_field.activity_map().copy(),
+            flow.rightward_activity,
+            flow.leftward_activity,
+            flow.downward_activity,
+            flow.upward_activity,
             0.0 if now_ms is None else float(now_ms),
         )
 
@@ -622,7 +666,6 @@ class RetinalSignalPathway:
         self.on_field.reset()
         self.off_field.reset()
         self.contrast_field.reset()
-        self.horizontal_flow.reset()
-        self.vertical_flow.reset()
+        self.directional_flow.reset()
         self._initialized = False
         self._last_timestamp_ms = None

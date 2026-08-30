@@ -3,11 +3,10 @@ import unittest
 import numpy as np
 
 from neural_field import (
-    HorizontalDirectionalFlowField,
+    CardinalDirectionalFlowField,
     RetinalSignalPathway,
     SpatialNeuronField,
     SynapseProjection,
-    VerticalDirectionalFlowField,
 )
 from vision_input import VisualInputExtractor
 
@@ -44,7 +43,7 @@ class SynapseProjectionTests(unittest.TestCase):
 
 class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
     def test_left_to_right_positive_sequence_activates_only_rightward_field(self):
-        field = HorizontalDirectionalFlowField(
+        field = CardinalDirectionalFlowField(
             1, 4, trace_tau_ms=100.0, flow_gain=2.0
         )
         off = np.zeros((1, 4), dtype=np.float32)
@@ -62,7 +61,7 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.leftward_activity, 0.0, atol=1e-7)
 
     def test_right_to_left_positive_sequence_activates_only_leftward_field(self):
-        field = HorizontalDirectionalFlowField(
+        field = CardinalDirectionalFlowField(
             1, 4, trace_tau_ms=100.0, flow_gain=2.0
         )
         off = np.zeros((1, 4), dtype=np.float32)
@@ -80,7 +79,7 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.rightward_activity, 0.0, atol=1e-7)
 
     def test_synchronous_neighbor_change_cancels_in_both_directions(self):
-        field = HorizontalDirectionalFlowField(
+        field = CardinalDirectionalFlowField(
             1, 3, trace_tau_ms=100.0, flow_gain=2.0
         )
         off = np.zeros((1, 3), dtype=np.float32)
@@ -91,7 +90,7 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.leftward_activity, 0.0, atol=1e-7)
 
     def test_dark_change_can_drive_rightward_direction(self):
-        field = HorizontalDirectionalFlowField(
+        field = CardinalDirectionalFlowField(
             1, 4, trace_tau_ms=100.0, flow_gain=2.0
         )
         on = np.zeros((1, 4), dtype=np.float32)
@@ -109,7 +108,7 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.leftward_activity, 0.0, atol=1e-7)
 
     def test_dark_change_can_drive_leftward_direction(self):
-        field = HorizontalDirectionalFlowField(
+        field = CardinalDirectionalFlowField(
             1, 4, trace_tau_ms=100.0, flow_gain=2.0
         )
         on = np.zeros((1, 4), dtype=np.float32)
@@ -127,7 +126,7 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.rightward_activity, 0.0, atol=1e-7)
 
     def test_bad_shape_and_backward_time_do_not_corrupt_flow_state(self):
-        field = HorizontalDirectionalFlowField(1, 3)
+        field = CardinalDirectionalFlowField(1, 3)
         zeros = np.zeros((1, 3), dtype=np.float32)
         field.process(zeros, zeros, timestamp_ms=100.0)
         before = field.snapshot()
@@ -150,17 +149,23 @@ class HorizontalDirectionalFlowFieldTests(unittest.TestCase):
 
 class VerticalDirectionalFlowFieldTests(unittest.TestCase):
     def test_top_to_bottom_positive_sequence_activates_only_downward_field(self):
-        field = VerticalDirectionalFlowField(
-            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        field = CardinalDirectionalFlowField(
+            4, 2, trace_tau_ms=100.0, flow_gain=2.0
         )
-        off = np.zeros((4, 1), dtype=np.float32)
+        off = np.zeros((4, 2), dtype=np.float32)
         field.process(
-            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             off,
             timestamp_ms=0.0,
         )
         result = field.process(
-            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             off,
             timestamp_ms=20.0,
         )
@@ -168,17 +173,23 @@ class VerticalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
 
     def test_bottom_to_top_positive_sequence_activates_only_upward_field(self):
-        field = VerticalDirectionalFlowField(
-            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        field = CardinalDirectionalFlowField(
+            4, 2, trace_tau_ms=100.0, flow_gain=2.0
         )
-        off = np.zeros((4, 1), dtype=np.float32)
+        off = np.zeros((4, 2), dtype=np.float32)
         field.process(
-            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             off,
             timestamp_ms=0.0,
         )
         result = field.process(
-            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             off,
             timestamp_ms=20.0,
         )
@@ -186,54 +197,50 @@ class VerticalDirectionalFlowFieldTests(unittest.TestCase):
         np.testing.assert_allclose(result.downward_activity, 0.0, atol=1e-7)
 
     def test_synchronous_vertical_neighbor_change_cancels_both_directions(self):
-        field = VerticalDirectionalFlowField(
-            3, 1, trace_tau_ms=100.0, flow_gain=2.0
+        field = CardinalDirectionalFlowField(
+            3, 2, trace_tau_ms=100.0, flow_gain=2.0
         )
-        off = np.zeros((3, 1), dtype=np.float32)
-        simultaneous = np.array([[1.0], [1.0], [0.0]], dtype=np.float32)
+        off = np.zeros((3, 2), dtype=np.float32)
+        simultaneous = np.array(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 0.0]], dtype=np.float32
+        )
         field.process(simultaneous, off, timestamp_ms=0.0)
         result = field.process(simultaneous, off, timestamp_ms=20.0)
         np.testing.assert_allclose(result.downward_activity, 0.0, atol=1e-7)
         np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
 
     def test_dark_change_can_drive_downward_direction(self):
-        field = VerticalDirectionalFlowField(
-            4, 1, trace_tau_ms=100.0, flow_gain=2.0
+        field = CardinalDirectionalFlowField(
+            4, 2, trace_tau_ms=100.0, flow_gain=2.0
         )
-        on = np.zeros((4, 1), dtype=np.float32)
+        on = np.zeros((4, 2), dtype=np.float32)
         field.process(
             on,
-            np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             timestamp_ms=0.0,
         )
         result = field.process(
             on,
-            np.array([[0.0], [1.0], [0.0], [0.0]], dtype=np.float32),
+            np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                dtype=np.float32,
+            ),
             timestamp_ms=20.0,
         )
         self.assertGreater(float(result.downward_activity[1, 0]), 0.0)
         np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
 
-    def test_bad_shape_and_backward_time_do_not_corrupt_flow_state(self):
-        field = VerticalDirectionalFlowField(3, 1)
-        zeros = np.zeros((3, 1), dtype=np.float32)
-        field.process(zeros, zeros, timestamp_ms=100.0)
-        before = field.snapshot()
-        with self.assertRaises(ValueError):
-            field.process(
-                np.zeros((3, 2), dtype=np.float32),
-                zeros,
-                timestamp_ms=110.0,
-            )
-        with self.assertRaises(ValueError):
-            field.process(zeros, zeros, timestamp_ms=90.0)
-        after = field.snapshot()
-        np.testing.assert_array_equal(
-            after.downward_activity, before.downward_activity
-        )
-        np.testing.assert_array_equal(after.upward_activity, before.upward_activity)
-        np.testing.assert_array_equal(after.on_trace, before.on_trace)
-        np.testing.assert_array_equal(after.off_trace, before.off_trace)
+    def test_axis_comparisons_do_not_own_duplicate_temporal_traces(self):
+        field = CardinalDirectionalFlowField(3, 2)
+        self.assertEqual(field.on_trace.shape, (3, 2))
+        self.assertEqual(field.off_trace.shape, (3, 2))
+        self.assertFalse(hasattr(field.horizontal_flow, "on_trace"))
+        self.assertFalse(hasattr(field.horizontal_flow, "off_trace"))
+        self.assertFalse(hasattr(field.vertical_flow, "on_trace"))
+        self.assertFalse(hasattr(field.vertical_flow, "off_trace"))
 
 
 class RetinalSignalPathwayTests(unittest.TestCase):
@@ -372,6 +379,26 @@ class RetinalSignalPathwayTests(unittest.TestCase):
         result = pathway.process(bottom, timestamp_ms=40.0)
         self.assertGreater(float(result.downward_activity[1, 0]), 0.0)
         np.testing.assert_allclose(result.upward_activity, 0.0, atol=1e-7)
+
+    def test_live_brightness_sequence_reaches_upward_branch_only(self):
+        pathway = RetinalSignalPathway(
+            4,
+            2,
+            baseline_tau_ms=1000.0,
+            response_gain=3.0,
+            flow_trace_tau_ms=100.0,
+            flow_gain=4.0,
+        )
+        neutral = np.full((4, 2), 0.5, dtype=np.float32)
+        bottom = neutral.copy()
+        top = neutral.copy()
+        bottom[1, 0] = 1.0
+        top[0, 0] = 1.0
+        pathway.process(neutral, timestamp_ms=0.0)
+        pathway.process(bottom, timestamp_ms=20.0)
+        result = pathway.process(top, timestamp_ms=40.0)
+        self.assertGreater(float(result.upward_activity[0, 0]), 0.0)
+        np.testing.assert_allclose(result.downward_activity, 0.0, atol=1e-7)
 
     def test_bad_input_fails_without_mutating_retinal_state(self):
         pathway = RetinalSignalPathway(2, 2)
