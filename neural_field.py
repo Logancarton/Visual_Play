@@ -1,10 +1,4 @@
-"""Core spatial neuron-field and early retinal signal logic for Visual_Play.
-
-This module owns modeled neuron state and the live early-retinal branches.
-Each visual location uses identical math. Temporal luminance variation splits
-into positive and negative branches, while local contrast compares each center
-location with the immediate spatial surround.
-"""
+"""Spatial neuron substrate and live early-retinal signal branches."""
 
 from __future__ import annotations
 
@@ -18,14 +12,12 @@ import numpy as np
 
 @dataclass(frozen=True)
 class FieldSnapshot:
-    """Read-only copy of one field state after a step."""
-
     potential: np.ndarray
     activity: np.ndarray
 
 
 class SpatialNeuronField:
-    """A 2D population whose array cells are individual modeled neurons."""
+    """2D modeled-neuron population with stable IDs and XY positions."""
 
     def __init__(
         self,
@@ -53,10 +45,10 @@ class SpatialNeuronField:
         self.max_potential = float(max_potential)
 
         self.neuron_ids = np.arange(self.neuron_count, dtype=np.int32)
-        yy, xx = np.mgrid[0 : self.rows, 0 : self.cols]
+        yy, xx = np.mgrid[0:self.rows, 0:self.cols]
         x = xx.astype(np.float32) / max(self.cols - 1, 1)
         y = yy.astype(np.float32) / max(self.rows - 1, 1)
-        self.positions = np.stack([x.reshape(-1), y.reshape(-1)], axis=1)
+        self.positions = np.stack((x.ravel(), y.ravel()), axis=1)
 
         self.potential = np.zeros(self.neuron_count, dtype=np.float32)
         self.activity = np.zeros(self.neuron_count, dtype=np.float32)
@@ -64,7 +56,7 @@ class SpatialNeuronField:
     def _coerce_drive(self, drive: np.ndarray | Iterable[float]) -> np.ndarray:
         array = np.asarray(drive, dtype=np.float32)
         if array.shape == (self.rows, self.cols):
-            flat = array.reshape(-1)
+            flat = array.ravel()
         elif array.shape == (self.neuron_count,):
             flat = array
         else:
@@ -78,26 +70,16 @@ class SpatialNeuronField:
 
     def step(self, drive: np.ndarray | Iterable[float]) -> FieldSnapshot:
         incoming = self._coerce_drive(drive)
-        retained = (1.0 - self.leak) * self.potential
-        next_potential = retained + incoming
-        np.clip(next_potential, 0.0, self.max_potential, out=next_potential)
-
+        potential = (1.0 - self.leak) * self.potential + incoming
+        potential = np.clip(potential, 0.0, self.max_potential).astype(np.float32)
         denom = max(1.0 - self.threshold, 1e-6)
-        next_activity = np.clip(
-            (next_potential - self.threshold) / denom,
-            0.0,
-            1.0,
-        ).astype(np.float32)
-
-        self.potential = next_potential.astype(np.float32, copy=False)
-        self.activity = next_activity
+        activity = np.clip((potential - self.threshold) / denom, 0.0, 1.0)
+        self.potential = potential
+        self.activity = activity.astype(np.float32)
         return self.snapshot()
 
     def snapshot(self) -> FieldSnapshot:
-        return FieldSnapshot(
-            potential=self.potential.copy(),
-            activity=self.activity.copy(),
-        )
+        return FieldSnapshot(self.potential.copy(), self.activity.copy())
 
     def activity_map(self) -> np.ndarray:
         return self.activity.reshape(self.rows, self.cols)
@@ -124,10 +106,9 @@ class SynapseProjection:
         if source_count < 1 or target_count < 1:
             raise ValueError("source_count and target_count must be >= 1")
 
-        source = np.asarray(source_indices, dtype=np.int32).reshape(-1)
-        target = np.asarray(target_indices, dtype=np.int32).reshape(-1)
-        weight = np.asarray(weights, dtype=np.float32).reshape(-1)
-
+        source = np.asarray(source_indices, dtype=np.int32).ravel()
+        target = np.asarray(target_indices, dtype=np.int32).ravel()
+        weight = np.asarray(weights, dtype=np.float32).ravel()
         if not (source.size == target.size == weight.size):
             raise ValueError("source_indices, target_indices, and weights must match")
         if source.size and (source.min() < 0 or source.max() >= source_count):
@@ -136,14 +117,10 @@ class SynapseProjection:
             raise ValueError("target index out of range")
         if not np.all(np.isfinite(weight)):
             raise ValueError("weights must contain only finite values")
-
-        pairs = (
-            np.stack([source, target], axis=1)
-            if source.size
-            else np.empty((0, 2), dtype=np.int32)
-        )
-        if pairs.size and np.unique(pairs, axis=0).shape[0] != pairs.shape[0]:
-            raise ValueError("duplicate source-target synapses are not allowed")
+        if source.size:
+            pairs = np.stack((source, target), axis=1)
+            if np.unique(pairs, axis=0).shape[0] != pairs.shape[0]:
+                raise ValueError("duplicate source-target synapses are not allowed")
 
         self.source_count = int(source_count)
         self.target_count = int(target_count)
@@ -170,7 +147,7 @@ class SynapseProjection:
         return cls(source_count, target_count, indices, indices, weights)
 
     def propagate(self, source_activity: np.ndarray | Iterable[float]) -> np.ndarray:
-        activity = np.asarray(source_activity, dtype=np.float32).reshape(-1)
+        activity = np.asarray(source_activity, dtype=np.float32).ravel()
         if activity.shape != (self.source_count,):
             raise ValueError(
                 f"source_activity must have shape ({self.source_count},), "
@@ -178,10 +155,12 @@ class SynapseProjection:
             )
         if not np.all(np.isfinite(activity)):
             raise ValueError("source_activity must contain only finite values")
-
         target_drive = np.zeros(self.target_count, dtype=np.float32)
-        contributions = activity[self.source_indices] * self.weights
-        np.add.at(target_drive, self.target_indices, contributions)
+        np.add.at(
+            target_drive,
+            self.target_indices,
+            activity[self.source_indices] * self.weights,
+        )
         return target_drive
 
     def outgoing(self, source_neuron_id: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -198,32 +177,131 @@ class SynapseProjection:
 
 
 @dataclass(frozen=True)
-class RetinalSignalSnapshot:
-    """Observable state of the live early-retinal signal branches."""
+class DirectionalFlowSnapshot:
+    rightward_activity: np.ndarray
+    on_trace: np.ndarray
+    off_trace: np.ndarray
+    timestamp_ms: float
 
+
+class DirectionalFlowField:
+    """One opponent direction detector: left-to-right only."""
+
+    def __init__(
+        self,
+        rows: int,
+        cols: int,
+        *,
+        trace_tau_ms: float = 100.0,
+        flow_gain: float = 4.0,
+    ) -> None:
+        if rows < 1 or cols < 2:
+            raise ValueError("rows must be >= 1 and cols must be >= 2")
+        if trace_tau_ms <= 0.0 or flow_gain <= 0.0:
+            raise ValueError("trace_tau_ms and flow_gain must be > 0")
+
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.trace_tau_ms = float(trace_tau_ms)
+        self.flow_gain = float(flow_gain)
+        self.field = SpatialNeuronField(
+            rows, cols, threshold=0.0, leak=1.0, max_potential=1.0
+        )
+        self.on_trace = np.zeros((rows, cols), dtype=np.float32)
+        self.off_trace = np.zeros((rows, cols), dtype=np.float32)
+        self._last_timestamp_ms: float | None = None
+
+    @property
+    def neuron_count(self) -> int:
+        return self.field.neuron_count
+
+    def _coerce(self, values: np.ndarray, name: str) -> np.ndarray:
+        activity = np.asarray(values, dtype=np.float32)
+        if activity.shape != (self.rows, self.cols):
+            raise ValueError(
+                f"{name} must have shape {(self.rows, self.cols)}, got {activity.shape}"
+            )
+        if not np.all(np.isfinite(activity)):
+            raise ValueError(f"{name} must contain only finite values")
+        return np.clip(activity, 0.0, 1.0)
+
+    def process(
+        self,
+        on_activity: np.ndarray,
+        off_activity: np.ndarray,
+        *,
+        timestamp_ms: float,
+    ) -> DirectionalFlowSnapshot:
+        on = self._coerce(on_activity, "on_activity")
+        off = self._coerce(off_activity, "off_activity")
+        now_ms = float(timestamp_ms)
+        if not math.isfinite(now_ms):
+            raise ValueError("timestamp_ms must be finite")
+        if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
+            raise ValueError("timestamp_ms cannot move backward")
+
+        if self._last_timestamp_ms is None:
+            self.field.step(np.zeros((self.rows, self.cols), dtype=np.float32))
+            self.on_trace = on.copy()
+            self.off_trace = off.copy()
+            self._last_timestamp_ms = now_ms
+            return self.snapshot(now_ms)
+
+        preferred = (
+            self.on_trace[:, :-1] * on[:, 1:]
+            + self.off_trace[:, :-1] * off[:, 1:]
+        )
+        opponent = (
+            self.on_trace[:, 1:] * on[:, :-1]
+            + self.off_trace[:, 1:] * off[:, :-1]
+        )
+        drive = np.zeros((self.rows, self.cols), dtype=np.float32)
+        drive[:, 1:] = np.clip(
+            (preferred - opponent) * self.flow_gain, 0.0, 1.0
+        )
+        flow = self.field.step(drive)
+
+        dt_ms = now_ms - self._last_timestamp_ms
+        alpha = 1.0 - math.exp(-dt_ms / self.trace_tau_ms) if dt_ms > 0.0 else 0.0
+        self.on_trace += alpha * (on - self.on_trace)
+        self.off_trace += alpha * (off - self.off_trace)
+        self._last_timestamp_ms = now_ms
+
+        return DirectionalFlowSnapshot(
+            flow.activity.reshape(self.rows, self.cols),
+            self.on_trace.copy(),
+            self.off_trace.copy(),
+            now_ms,
+        )
+
+    def snapshot(self, timestamp_ms: float | None = None) -> DirectionalFlowSnapshot:
+        now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
+        return DirectionalFlowSnapshot(
+            self.field.activity_map().copy(),
+            self.on_trace.copy(),
+            self.off_trace.copy(),
+            0.0 if now_ms is None else float(now_ms),
+        )
+
+    def reset(self) -> None:
+        self.field.reset()
+        self.on_trace.fill(0.0)
+        self.off_trace.fill(0.0)
+        self._last_timestamp_ms = None
+
+
+@dataclass(frozen=True)
+class RetinalSignalSnapshot:
     baseline: np.ndarray
     on_activity: np.ndarray
     off_activity: np.ndarray
     contrast_activity: np.ndarray
+    rightward_activity: np.ndarray
     timestamp_ms: float
 
 
 class RetinalSignalPathway:
-    """Live early-retinal branching with identical math at every location.
-
-    Temporal variation:
-        delta = current_luminance - adapting_baseline
-        ON    = max(delta, 0) * response_gain
-        OFF   = max(-delta, 0) * response_gain
-
-    Spatial local contrast:
-        surround = mean(immediate 8-neighbor luminance)
-        contrast = abs(current_luminance - surround) * contrast_gain
-
-    The temporal baseline adapts independently at each location. Local contrast
-    is instantaneous spatial comparison and therefore exists on the first frame.
-    ON/OFF here means graded positive/negative luminance variation, not spikes.
-    """
+    """Live brightness -> variation, contrast, and one-direction flow path."""
 
     def __init__(
         self,
@@ -233,15 +311,13 @@ class RetinalSignalPathway:
         baseline_tau_ms: float = 350.0,
         response_gain: float = 3.0,
         contrast_gain: float = 4.0,
+        flow_trace_tau_ms: float = 100.0,
+        flow_gain: float = 4.0,
     ) -> None:
-        if rows < 1 or cols < 1:
-            raise ValueError("rows and cols must be >= 1")
-        if baseline_tau_ms <= 0.0:
-            raise ValueError("baseline_tau_ms must be > 0")
-        if response_gain <= 0.0:
-            raise ValueError("response_gain must be > 0")
-        if contrast_gain <= 0.0:
-            raise ValueError("contrast_gain must be > 0")
+        if rows < 1 or cols < 2:
+            raise ValueError("rows must be >= 1 and cols must be >= 2")
+        if min(baseline_tau_ms, response_gain, contrast_gain) <= 0.0:
+            raise ValueError("baseline_tau_ms and gains must be > 0")
 
         self.rows = int(rows)
         self.cols = int(cols)
@@ -250,12 +326,17 @@ class RetinalSignalPathway:
         self.response_gain = float(response_gain)
         self.contrast_gain = float(contrast_gain)
 
-        field_kwargs = dict(threshold=0.0, leak=1.0, max_potential=1.0)
-        self.on_field = SpatialNeuronField(self.rows, self.cols, **field_kwargs)
-        self.off_field = SpatialNeuronField(self.rows, self.cols, **field_kwargs)
-        self.contrast_field = SpatialNeuronField(self.rows, self.cols, **field_kwargs)
-
-        self.baseline = np.zeros((self.rows, self.cols), dtype=np.float32)
+        kwargs = dict(threshold=0.0, leak=1.0, max_potential=1.0)
+        self.on_field = SpatialNeuronField(rows, cols, **kwargs)
+        self.off_field = SpatialNeuronField(rows, cols, **kwargs)
+        self.contrast_field = SpatialNeuronField(rows, cols, **kwargs)
+        self.rightward_flow = DirectionalFlowField(
+            rows,
+            cols,
+            trace_tau_ms=flow_trace_tau_ms,
+            flow_gain=flow_gain,
+        )
+        self.baseline = np.zeros((rows, cols), dtype=np.float32)
         self._initialized = False
         self._last_timestamp_ms: float | None = None
 
@@ -265,6 +346,7 @@ class RetinalSignalPathway:
             self.on_field.neuron_count
             + self.off_field.neuron_count
             + self.contrast_field.neuron_count
+            + self.rightward_flow.neuron_count
         )
 
     def _coerce_luminance(self, brightness: np.ndarray) -> np.ndarray:
@@ -280,19 +362,13 @@ class RetinalSignalPathway:
 
     @staticmethod
     def _local_surround(current: np.ndarray) -> np.ndarray:
-        """Return identical 8-neighbor surround mean for every spatial cell."""
         padded = np.pad(current, 1, mode="edge")
-        surround_sum = (
-            padded[:-2, :-2]
-            + padded[:-2, 1:-1]
-            + padded[:-2, 2:]
-            + padded[1:-1, :-2]
-            + padded[1:-1, 2:]
-            + padded[2:, :-2]
-            + padded[2:, 1:-1]
-            + padded[2:, 2:]
+        surround = (
+            padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:]
+            + padded[1:-1, :-2] + padded[1:-1, 2:]
+            + padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
         )
-        return (surround_sum / 8.0).astype(np.float32)
+        return (surround / 8.0).astype(np.float32)
 
     def process(
         self,
@@ -301,23 +377,16 @@ class RetinalSignalPathway:
         timestamp_ms: float | None = None,
     ) -> RetinalSignalSnapshot:
         current = self._coerce_luminance(brightness)
-        now_ms = (
-            time.monotonic() * 1000.0
-            if timestamp_ms is None
-            else float(timestamp_ms)
-        )
+        now_ms = time.monotonic() * 1000.0 if timestamp_ms is None else float(timestamp_ms)
         if not math.isfinite(now_ms):
             raise ValueError("timestamp_ms must be finite")
         if self._last_timestamp_ms is not None and now_ms < self._last_timestamp_ms:
             raise ValueError("timestamp_ms cannot move backward")
 
         surround = self._local_surround(current)
-        contrast_drive = np.clip(
-            np.abs(current - surround) * self.contrast_gain,
-            0.0,
-            1.0,
+        contrast = self.contrast_field.step(
+            np.clip(np.abs(current - surround) * self.contrast_gain, 0.0, 1.0)
         )
-        contrast_snapshot = self.contrast_field.step(contrast_drive)
 
         if not self._initialized:
             self.baseline = current.copy()
@@ -325,51 +394,50 @@ class RetinalSignalPathway:
             self._last_timestamp_ms = now_ms
             self.on_field.reset()
             self.off_field.reset()
-            return RetinalSignalSnapshot(
-                baseline=self.baseline.copy(),
-                on_activity=self.on_field.activity_map().copy(),
-                off_activity=self.off_field.activity_map().copy(),
-                contrast_activity=contrast_snapshot.activity.reshape(
-                    self.rows,
-                    self.cols,
-                ),
+            flow = self.rightward_flow.process(
+                self.on_field.activity_map(),
+                self.off_field.activity_map(),
                 timestamp_ms=now_ms,
+            )
+            return RetinalSignalSnapshot(
+                self.baseline.copy(),
+                self.on_field.activity_map().copy(),
+                self.off_field.activity_map().copy(),
+                contrast.activity.reshape(self.rows, self.cols),
+                flow.rightward_activity,
+                now_ms,
             )
 
         delta = current - self.baseline
-        on_drive = np.clip(delta * self.response_gain, 0.0, 1.0)
-        off_drive = np.clip(-delta * self.response_gain, 0.0, 1.0)
+        on = self.on_field.step(np.clip(delta * self.response_gain, 0.0, 1.0))
+        off = self.off_field.step(np.clip(-delta * self.response_gain, 0.0, 1.0))
+        on_map = on.activity.reshape(self.rows, self.cols)
+        off_map = off.activity.reshape(self.rows, self.cols)
+        flow = self.rightward_flow.process(on_map, off_map, timestamp_ms=now_ms)
 
-        on_snapshot = self.on_field.step(on_drive)
-        off_snapshot = self.off_field.step(off_drive)
-
-        dt_ms = now_ms - float(self._last_timestamp_ms)
-        alpha = (
-            1.0 - math.exp(-dt_ms / self.baseline_tau_ms)
-            if dt_ms > 0.0
-            else 0.0
-        )
+        dt_ms = now_ms - self._last_timestamp_ms
+        alpha = 1.0 - math.exp(-dt_ms / self.baseline_tau_ms) if dt_ms > 0.0 else 0.0
         self.baseline = (self.baseline + alpha * delta).astype(np.float32)
         self._last_timestamp_ms = now_ms
 
         return RetinalSignalSnapshot(
-            baseline=self.baseline.copy(),
-            on_activity=on_snapshot.activity.reshape(self.rows, self.cols),
-            off_activity=off_snapshot.activity.reshape(self.rows, self.cols),
-            contrast_activity=contrast_snapshot.activity.reshape(self.rows, self.cols),
-            timestamp_ms=now_ms,
+            self.baseline.copy(),
+            on_map,
+            off_map,
+            contrast.activity.reshape(self.rows, self.cols),
+            flow.rightward_activity,
+            now_ms,
         )
 
     def snapshot(self, timestamp_ms: float | None = None) -> RetinalSignalSnapshot:
         now_ms = self._last_timestamp_ms if timestamp_ms is None else float(timestamp_ms)
-        if now_ms is None:
-            now_ms = 0.0
         return RetinalSignalSnapshot(
-            baseline=self.baseline.copy(),
-            on_activity=self.on_field.activity_map().copy(),
-            off_activity=self.off_field.activity_map().copy(),
-            contrast_activity=self.contrast_field.activity_map().copy(),
-            timestamp_ms=float(now_ms),
+            self.baseline.copy(),
+            self.on_field.activity_map().copy(),
+            self.off_field.activity_map().copy(),
+            self.contrast_field.activity_map().copy(),
+            self.rightward_flow.field.activity_map().copy(),
+            0.0 if now_ms is None else float(now_ms),
         )
 
     def reset(self) -> None:
@@ -377,5 +445,6 @@ class RetinalSignalPathway:
         self.on_field.reset()
         self.off_field.reset()
         self.contrast_field.reset()
+        self.rightward_flow.reset()
         self._initialized = False
         self._last_timestamp_ms = None

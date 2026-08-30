@@ -1,8 +1,8 @@
 """Live diagnostic window for the early retinal signal branches.
 
 The UI does not define neural behavior. It shows the camera, measured brightness,
-positive/negative temporal variation, and local spatial contrast owned by
-neural_field.py.
+positive/negative temporal variation, local spatial contrast, and the first
+one-direction temporal-spatial flow field owned by neural_field.py.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ class VisualPlayUI:
         self.last_on_activity: Optional[np.ndarray] = None
         self.last_off_activity: Optional[np.ndarray] = None
         self.last_contrast_activity: Optional[np.ndarray] = None
+        self.last_rightward_activity: Optional[np.ndarray] = None
 
         self.fps = 0.0
         self._last_time = time.monotonic()
@@ -155,6 +156,11 @@ class VisualPlayUI:
             return image
         return cv2.flip(self.last_frame, 1)
 
+    def _map_or_blank(self, values: Optional[np.ndarray]) -> np.ndarray:
+        if values is None:
+            return self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
+        return self._map_to_bgr(values)
+
     def compose(self) -> np.ndarray:
         canvas = self._blank(self.HEIGHT, self.WIDTH, 5)
 
@@ -168,88 +174,82 @@ class VisualPlayUI:
         self._text(canvas, self.status[:90], 900, 38, 0.36)
 
         gap = 12
-        row_h = (self.HEIGHT - header_h - gap * 3) // 2
-        top_w = (self.WIDTH - gap * 3) // 2
-        bottom_w = (self.WIDTH - gap * 4) // 3
+        top_h = 350
+        lower_h = (self.HEIGHT - header_h - top_h - gap * 4) // 2
+        tile_w = (self.WIDTH - gap * 3) // 2
 
-        brightness = (
-            self._map_to_bgr(self.last_brightness)
-            if self.last_brightness is not None
-            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
-        )
-        on_activity = (
-            self._map_to_bgr(self.last_on_activity)
-            if self.last_on_activity is not None
-            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
-        )
-        off_activity = (
-            self._map_to_bgr(self.last_off_activity)
-            if self.last_off_activity is not None
-            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
-        )
-        contrast_activity = (
-            self._map_to_bgr(self.last_contrast_activity)
-            if self.last_contrast_activity is not None
-            else self._blank(self.FIELD_ROWS, self.FIELD_COLS, 4)
-        )
+        brightness = self._map_or_blank(self.last_brightness)
+        on_activity = self._map_or_blank(self.last_on_activity)
+        off_activity = self._map_or_blank(self.last_off_activity)
+        contrast_activity = self._map_or_blank(self.last_contrast_activity)
+        rightward_activity = self._map_or_blank(self.last_rightward_activity)
 
         resolution = f"{self.FIELD_COLS} x {self.FIELD_ROWS}"
         branch_count = self.pathway.on_field.neuron_count
 
-        top_tiles = [
-            self._tile(
-                self._camera_image(),
-                "WEBCAM",
-                "physical input",
-                top_w,
-                row_h,
-                smooth=True,
-            ),
-            self._tile(
-                brightness,
-                "BRIGHTNESS",
-                f"measured {resolution} luminance",
-                top_w,
-                row_h,
-            ),
-        ]
-        bottom_tiles = [
-            self._tile(
-                on_activity,
-                "POSITIVE VARIATION",
-                f"{branch_count:,} neurons: brighter than adapting baseline",
-                bottom_w,
-                row_h,
-            ),
-            self._tile(
-                off_activity,
-                "NEGATIVE VARIATION",
-                f"{branch_count:,} neurons: darker than adapting baseline",
-                bottom_w,
-                row_h,
-            ),
-            self._tile(
-                contrast_activity,
-                "LOCAL CONTRAST",
-                f"{branch_count:,} neurons: center vs immediate surround",
-                bottom_w,
-                row_h,
-            ),
+        rows = [
+            [
+                self._tile(
+                    self._camera_image(),
+                    "WEBCAM",
+                    "physical input",
+                    tile_w,
+                    top_h,
+                    smooth=True,
+                ),
+                self._tile(
+                    brightness,
+                    "BRIGHTNESS",
+                    f"measured {resolution} luminance",
+                    tile_w,
+                    top_h,
+                ),
+            ],
+            [
+                self._tile(
+                    on_activity,
+                    "POSITIVE VARIATION",
+                    f"{branch_count:,} neurons: brighter than adapting baseline",
+                    tile_w,
+                    lower_h,
+                ),
+                self._tile(
+                    off_activity,
+                    "NEGATIVE VARIATION",
+                    f"{branch_count:,} neurons: darker than adapting baseline",
+                    tile_w,
+                    lower_h,
+                ),
+            ],
+            [
+                self._tile(
+                    contrast_activity,
+                    "LOCAL CONTRAST",
+                    f"{branch_count:,} neurons: center vs immediate surround",
+                    tile_w,
+                    lower_h,
+                ),
+                self._tile(
+                    rightward_activity,
+                    "RIGHTWARD FLOW  ->",
+                    f"{branch_count:,} neurons: left-before-right opponent timing",
+                    tile_w,
+                    lower_h,
+                ),
+            ],
         ]
 
-        top_y = header_h + gap
-        bottom_y = header_h + gap * 2 + row_h
-        top_positions = [(gap, top_y), (gap * 2 + top_w, top_y)]
-        bottom_positions = [
-            (gap, bottom_y),
-            (gap * 2 + bottom_w, bottom_y),
-            (gap * 3 + bottom_w * 2, bottom_y),
+        y_positions = [
+            header_h + gap,
+            header_h + gap * 2 + top_h,
+            header_h + gap * 3 + top_h + lower_h,
         ]
+        heights = [top_h, lower_h, lower_h]
 
-        for tile, (x, y) in zip(top_tiles, top_positions):
-            canvas[y : y + row_h, x : x + top_w] = tile
-        for tile, (x, y) in zip(bottom_tiles, bottom_positions):
-            canvas[y : y + row_h, x : x + bottom_w] = tile
+        for row, y, height in zip(rows, y_positions, heights):
+            for index, tile in enumerate(row):
+                x = gap + index * (tile_w + gap)
+                canvas[y : y + height, x : x + tile_w] = tile
         return canvas
 
     def reset(self) -> None:
@@ -259,6 +259,7 @@ class VisualPlayUI:
         self.last_on_activity = None
         self.last_off_activity = None
         self.last_contrast_activity = None
+        self.last_rightward_activity = None
         self.status = "Retinal state reset; next frame will seed temporal baseline."
 
     def run(self) -> None:
@@ -287,6 +288,7 @@ class VisualPlayUI:
                         self.last_on_activity = result.on_activity
                         self.last_off_activity = result.off_activity
                         self.last_contrast_activity = result.contrast_activity
+                        self.last_rightward_activity = result.rightward_activity
 
                 cv2.imshow(self.WINDOW, self.compose())
                 key = cv2.waitKey(1) & 0xFF
